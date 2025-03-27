@@ -4,6 +4,7 @@ import torch.nn as nn
 from torch.nn import LeakyReLU
 from .blocks import FCBlock, Conv2Encoder, WatermarkEmbedder, WatermarkExtracter, ReluBlock
 from distortions.frequency2 import fixed_STFT
+import torch.nn.functional as F
 from silero_vad import load_silero_vad
 
 # from distortions.dl import distortion
@@ -136,11 +137,33 @@ def save_waveform(a_tensor, flag='original'):
 #             freeze_model_and_submodules(module)
 
 
+class MsgEmbedder(nn.Module):
+    def __init__(self, process_config, train_config):
+        super().__init__()
+        self.hop_length = process_config["mel"]["hop_length"]
+        self.sampling_rate = process_config["audio"]["or_sample_rate"]
+        self.prefilling_amt = int(train_config["watermark"]["prefilling_amt_second"]*self.sampling_rate // self.hop_length+1)
+        self.nbits = train_config["watermark"]["length"]
+        self.win_dim = int((process_config["mel"]["n_fft"] / 2) + 1)   # 322 / 2 + 1 = 162
+        self.embedding_table = torch.nn.Embedding(2*self.nbits, self.win_dim//2)
+        self.W_M = torch.nn.Linear(self.nbits, self.prefilling_amt,  bias=False)
+
+    def forward(self, msg):
+        # create indices to take from embedding layer
+        indices = 2 * torch.arange(msg.shape[-1]).to(msg.device)  # k: 0 2 4 ... 2k
+        indices = indices.repeat(msg.shape[0], 1).unsqueeze(1)  # b x k
+        indices = (indices + msg).long()
+        msg_embed = self.embedding_table(indices.long().squeeze(1))  # b x k -> b x k x (self.win_dim/2)
+        msg_embed = msg_embed.transpose(1, 2)  # [B, H, K]
+        watermark_encoded = self.W_M(msg_embed).unsqueeze(1).repeat(1, 1, 2, 1)
+        return watermark_encoded
+
+
 class Encoder(nn.Module):
-    def __init__(self, process_config, model_config, train_config, msg_length):
+    def __init__(self, process_config, model_config, train_config):
         super(Encoder, self).__init__()
         self.name = "conv2"
-        self.win_dim = int((process_config["mel"]["n_fft"] / 2) + 1)
+        self.win_dim = int((process_config["mel"]["n_fft"] / 2) + 1)   # 322 / 2 + 1 = 162
         self.add_carrier_noise = False
         self.block = model_config["conv2"]["block"]
         self.layers_CE = model_config["conv2"]["layers_CE"]
@@ -150,8 +173,10 @@ class Encoder(nn.Module):
         self.hop_length = process_config["mel"]["hop_length"]
         self.win_length = process_config["mel"]["win_length"]
         self.sampling_rate = process_config["audio"]["or_sample_rate"]
-        self.delay_amt = int((train_config["watermark"]["delay_amt_second"]*self.sampling_rate) // self.hop_length + 1)
-        self.future_amt = int((train_config["watermark"]["future_amt_second"]*self.sampling_rate) // self.hop_length + 1)
+        self.nbits = train_config["watermark"]["length"]
+        self.prefilling_amt = int(train_config["watermark"]["prefilling_amt_second"]*self.sampling_rate // self.hop_length+1)
+        self.delay_amt = int(train_config["watermark"]["delay_amt_second"]*self.sampling_rate // self.hop_length + 1)
+        self.future_amt = int(train_config["watermark"]["future_amt_second"]*self.sampling_rate // self.hop_length + 1)
         self.delay = True
         self.power = 1.0
         self.vad = load_silero_vad()
@@ -159,7 +184,7 @@ class Encoder(nn.Module):
 
         self.vocoder_step = model_config["structure"]["vocoder_step"]
         #MLP for the input wm
-        self.msg_linear_in = FCBlock(msg_length, self.win_dim//2, activation=LeakyReLU(inplace=True))
+        self.msg_linear_in = FCBlock(self.nbits, self.win_dim//2, activation=LeakyReLU(inplace=True))
 
         #stft transform
         self.stft = fixed_STFT(process_config["mel"]["n_fft"], process_config["mel"]["hop_length"], process_config["mel"]["win_length"])
@@ -186,7 +211,7 @@ class Encoder(nn.Module):
         actual_watermark = torch.cat([zeros_left, watermark_stft, zeros_right], dim=3) + EPS
         return actual_watermark
 
-    def forward(self, x, msg, global_step):
+    def forward(self, x, watermark_encoded, global_step):
         num_samples = x.shape[-1]
         _, _, stft_result = self.stft.transform(x)
         # Evaluate how many chunks we can process
@@ -210,8 +235,9 @@ class Encoder(nn.Module):
             # torch.Size([B, 81, 1])
             # torch.Size([B, 1, 81, 1])
             # torch.Size([B, 1, 162, 201])
-            watermark_encoded = self.msg_linear_in(msg).transpose(1, 2).unsqueeze(1).repeat(1, 1, 2,
-                                                                                            carrier_encoded.shape[3])
+            # watermark_encoded = self.msg_linear_in(msg).transpose(1, 2).unsqueeze(1).repeat(1, 1, 2,
+            #                                                                                 carrier_encoded.shape[3])
+
             concatenated_feature = torch.cat((carrier_encoded, stft_result[:, :, :,
                                                                i*self.future_amt:voice_prefilling + i*self.future_amt], watermark_encoded), dim=1)
             # [B, 2, bins, length]
@@ -266,7 +292,7 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, process_config, model_config, train_config, msg_length):
+    def __init__(self, process_config, model_config, train_config):
         super(Decoder, self).__init__()
         self.robust = model_config["robust"]
         # if self.robust:
@@ -276,14 +302,24 @@ class Decoder(nn.Module):
         # self.vocoder = get_vocoder(device)
         # self.vocoder_step = model_config["structure"]["vocoder_step"]
 
+        self.nbits = train_config["watermark"]["length"]
         self.win_dim = int((process_config["mel"]["n_fft"] / 2) + 1)
         self.hop_length = process_config["mel"]["hop_length"]
         self.block = model_config["conv2"]["block"]
         self.EX = WatermarkExtracter(input_channel=2, hidden_dim=model_config["conv2"]["hidden_dim"], block=self.block)
         self.stft = fixed_STFT(process_config["mel"]["n_fft"], process_config["mel"]["hop_length"], process_config["mel"]["win_length"])
-        self.msg_linear_out = FCBlock(self.win_dim//2, msg_length, activation=LeakyReLU(inplace=True))
+        self.msg_linear_out = FCBlock(self.win_dim//2, 1)
+        self.hidden = int((process_config["mel"]["n_fft"] / 2) + 1)//2  # (322 / 2 + 1)/2 = 81
 
-    def forward(self, y, global_step):
+        self.W_q = nn.Linear(self.hidden, self.hidden)
+        self.W_k = nn.Linear(2*self.hidden, self.hidden)
+        self.W_v = nn.Linear(2*self.hidden, self.hidden)
+
+        self.W_dem = nn.Linear(self.nbits, self.nbits)
+        self.pool = nn.AdaptiveAvgPool1d(self.nbits)
+        self.elu = nn.ELU(alpha=1.0, inplace=True)
+
+    def forward(self, y, E, global_step):
         y_identity = y
         y_d = y
         # if global_step > self.vocoder_step:
@@ -300,26 +336,84 @@ class Decoder(nn.Module):
         extracted_wm = self.EX(stft_result).squeeze(1)  # (B, win_dim, length)
         # Explicitly split the 162-dim vector into two halves of 81-dim each
         low, high = extracted_wm.chunk(2, dim=1)  # each has shape [B, win_dim / 2, length]
-        low_msg = torch.mean(low, dim=2, keepdim=True).transpose(1,2)
-        high_msg = torch.mean(high, dim=2, keepdim=True).transpose(1, 2)
-        msg_avg = (low_msg + high_msg) / 2  # Average the two halves -> shape: [B, 1, 81]
-        # msg = torch.mean(extracted_wm, dim=2, keepdim=True).transpose(1,2)
-        msg = self.msg_linear_out(msg_avg)
+        h_x = (low + high) / 2  # Average the two halves -> shape: [B, 81, L]
+
+        # Infer K and H dynamically
+        K = E.shape[0] // 2
+        H = E.shape[1]
+
+        # Reshape to (K, 2, H), then flatten last two dims to (K, 2H)
+        E_reshaped = E.view(K, 2, H).reshape(K, 2 * H)
+
+        # Project E into Key, Value
+        #    shape: [num_embeddings, embed_dim] -> [num_embeddings, hidden_dim]
+        K = self.W_k(E_reshaped)
+        V = self.W_v(E_reshaped)
+        h_x = self.pool(h_x)
+        h_x_dem = self.W_dem(h_x)  # Now shape = [b, H, K]
+        h_x_dem = h_x_dem.transpose(1, 2)  # Now shape = [b, K, H]
+
+        # Project the latent to get Query
+        #    shape: [batch_size, hidden_dim] -> [batch_size, hidden_dim]
+        Q = self.W_q(h_x_dem)
+
+        # Single-head cross-attention manually (simplified)
+        #    We need shapes that broadcast: Q -> [B, 1, hidden_dim], K -> [1, N, hidden_dim]
+        K_ = K.unsqueeze(0).repeat(Q.shape[0], 1, 1)   # [1, N, hidden_dim]
+        V_ = V.unsqueeze(0).repeat(Q.shape[0], 1, 1)   # [1, N, hidden_dim]
+
+        # Compute attention logits: [B, K, H] x [B, H, K] -> [B, K, K]
+        attn_logits = torch.bmm(Q, K_.transpose(1, 2))  # shape [B, K, K]
+        attn_weights = F.softmax(attn_logits / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
+
+        # Weighted sum for context: [B, K, K] x [B, K, H] -> [B, H, H]
+        context = torch.bmm(attn_weights, V_)  # [B, H, H]
+
+        V_x = self.elu(context)
+        msg = self.msg_linear_out(V_x).transpose(1, 2)
+
+        # low_msg = torch.mean(low, dim=2, keepdim=True).transpose(1,2)
+        # high_msg = torch.mean(high, dim=2, keepdim=True).transpose(1, 2)
+        # msg_avg = (low_msg + high_msg) / 2  # Average the two halves -> shape: [B, 1, 81]
+        # # msg = torch.mean(extracted_wm, dim=2, keepdim=True).transpose(1,2)
+        # msg = self.msg_linear_out(msg_avg)
 
         _, _, stft_result_identity = self.stft.transform(y_identity)
         extracted_wm_identity = self.EX(stft_result_identity).squeeze(1)
         low_identity, high_identity = extracted_wm_identity.chunk(2, dim=1)  # each has shape [B, win_dim / 2, length]
-        low_msg_identity = torch.mean(low_identity, dim=2, keepdim=True).transpose(1, 2)
-        high_msg_identity = torch.mean(high_identity, dim=2, keepdim=True).transpose(1, 2)
-        msg_avg_identity = (low_msg_identity + high_msg_identity) / 2  # Average the two halves -> shape: [B, 1, 81]
-        # msg_identity = torch.mean(extracted_wm_identity,dim=2, keepdim=True).transpose(1,2)
-        msg_identity = self.msg_linear_out(msg_avg_identity)
+
+        h_x_identity = (low_identity + high_identity) / 2  # Average the two halves -> shape: [B, 81, L]
+
+        h_x_identity = self.pool(h_x_identity)
+        h_x_dem_identity = self.W_dem(h_x_identity)  # Now shape = [b, H, K]
+        h_x_dem_identity = h_x_dem_identity.transpose(1, 2)  # Now shape = [b, K, H]
+
+        # Project the latent to get Query
+        #    shape: [batch_size, hidden_dim] -> [batch_size, hidden_dim]
+        Q = self.W_q(h_x_dem_identity)
+
+        # Single-head cross-attention manually (simplified)
+        #    We need shapes that broadcast: Q -> [B, 1, hidden_dim], K -> [1, N, hidden_dim]
+        K_ = K.unsqueeze(0).repeat(Q.shape[0], 1, 1)  # [1, N, hidden_dim]
+        V_ = V.unsqueeze(0).repeat(Q.shape[0], 1, 1)  # [1, N, hidden_dim]
+
+        # Compute attention logits: [B, K, H] x [B, H, K] -> [B, K, K]
+        attn_logits = torch.bmm(Q, K_.transpose(1, 2))  # shape [B, K, K]
+        attn_weights = F.softmax(attn_logits / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
+
+        # Weighted sum for context: [B, K, K] x [B, K, H] -> [B, H, H]
+        context = torch.bmm(attn_weights, V_)  # [B, H, H]
+
+        V_x = self.elu(context)
+        msg_identity = self.msg_linear_out(V_x).transpose(1, 2)
+
+        # low_msg_identity = torch.mean(low_identity, dim=2, keepdim=True).transpose(1, 2)
+        # high_msg_identity = torch.mean(high_identity, dim=2, keepdim=True).transpose(1, 2)
+        # msg_avg_identity = (low_msg_identity + high_msg_identity) / 2  # Average the two halves -> shape: [B, 1, 81]
+        # # msg_identity = torch.mean(extracted_wm_identity,dim=2, keepdim=True).transpose(1,2)
+        # msg_identity = self.msg_linear_out(msg_avg_identity)
         del stft_result, stft_result_identity, extracted_wm, extracted_wm_identity
         return msg, msg_identity
-
-
-
-
 
 
 # class Decoder(nn.Module):
@@ -379,7 +473,6 @@ class Decoder(nn.Module):
 #         msg = torch.mean(extracted_wm,dim=2, keepdim=True).transpose(1,2)
 #         msg = self.msg_linear_out(msg)
 #         return msg
-
 
 
 class Discriminator(nn.Module):

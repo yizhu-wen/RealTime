@@ -1,4 +1,5 @@
 import os
+import time
 import torch
 import yaml
 import logging
@@ -20,7 +21,7 @@ from torch.nn.functional import mse_loss
 from dataset.data import collate_fn
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import StepLR
-from model.conv2_mel_modules import Encoder, Decoder, Discriminator, save_waveform, save_spectrum, save_spectrum_normal
+from model.conv2_mel_modules import Encoder, Decoder, Discriminator, MsgEmbedder
 from dataset.data import WavDataset as MyDataset
 import tempfile
 import random
@@ -72,9 +73,7 @@ def set_random_seed(seed: int):
 
 def generate_random_msg(batch_size, msg_length, device):
     # random [0, 1], mapped to [-1, 1]
-    return (
-        torch.randint(0, 2, (batch_size, 1, msg_length), device=device).float() * 2
-    ) - 1
+    return torch.randint(0, 2, (batch_size, 1, msg_length), device=device).float()
 
 # Set random seed for reproducibility
 SEED = 2022
@@ -166,20 +165,20 @@ def main(configs):
                 "test_d_loss_on_cover",
             ]
         )
-        val_audio_table = wandb.Table(
-            columns=[
-                "Epoch",
-                "Original Audio",
-                "Watermarked Audio",
-                "Watermark Audio",
-                "Original Amplitude Spectrogram",
-                "Original Phase Spectrogram",
-                "Watermarked Amplitude Spectrogram",
-                "Watermarked Phase Spectrogram",
-                "Watermark Amplitude Spectrogram",
-                "Watermark Phase Spectrogram",
-            ]
-        )
+        # val_audio_table = wandb.Table(
+        #     columns=[
+        #         "Epoch",
+        #         "Original Audio",
+        #         "Watermarked Audio",
+        #         "Watermark Audio",
+        #         "Original Amplitude Spectrogram",
+        #         "Original Phase Spectrogram",
+        #         "Watermarked Amplitude Spectrogram",
+        #         "Watermarked Phase Spectrogram",
+        #         "Watermark Amplitude Spectrogram",
+        #         "Watermark Phase Spectrogram",
+        #     ]
+        # )
         test_audio_table = wandb.Table(
             columns=[
                 "Original Audio",
@@ -194,10 +193,9 @@ def main(configs):
         test_loss_summary_table = None
 
     # ---------------- build model
-    msg_length = train_config["watermark"]["length"]
-
-    encoder = Encoder(process_config, model_config, train_config, msg_length).to(device)
-    decoder = Decoder(process_config, model_config, train_config, msg_length).to(device)
+    msg_embedder = MsgEmbedder(process_config, train_config).to(device)
+    encoder = Encoder(process_config, model_config, train_config).to(device)
+    decoder = Decoder(process_config, model_config, train_config).to(device)
     # adv
     if train_config["adv"]:
         discriminator = Discriminator(process_config).to(device)
@@ -209,12 +207,10 @@ def main(configs):
             lr = train_config["optimize"]["lr"]
         )
         lr_sched_d = StepLR(d_op, step_size=train_config["optimize"]["step_size"], gamma=train_config["optimize"]["gamma"])
-    # shared parameters
-    if model_config["structure"]["share"]:
-        decoder.wav_encoder = encoder.wav_encoder
+
     # ---------------- optimizer
     en_de_op = Adam(
-            params=chain(decoder.parameters(), encoder.parameters()),
+            params=chain(msg_embedder.parameters(), encoder.parameters(), decoder.parameters()),
             betas=train_config["optimize"]["betas"],
             eps=train_config["optimize"]["eps"],
             weight_decay=train_config["optimize"]["weight_decay"],
@@ -236,6 +232,7 @@ def main(configs):
     # ---------------- train
     logging.info(logging_mark + "\t" + "Begin Training" + "\t" + logging_mark)
     epoch_num = train_config["iter"]["epoch"]
+    msg_length = train_config["watermark"]["length"]
     save_circle = train_config["iter"]["save_circle"]
     show_circle = train_config["iter"]["show_circle"]
     lambda_e = train_config["optimize"]["lambda_e"]
@@ -267,9 +264,11 @@ def main(configs):
             # ---------------- build watermark
             wav_matrix = sample["matrix"].to(device)
             msg = generate_random_msg(wav_matrix.size(0), msg_length, device)
-            watermark, carrier_wateramrked = encoder(wav_matrix, msg, global_step)
+            watermark_encoded = msg_embedder(msg)
+            E = msg_embedder.embedding_table.weight
+            watermark, carrier_wateramrked = encoder(wav_matrix, watermark_encoded, global_step)
             y_wm = wav_matrix + watermark
-            decoded = decoder(y_wm, global_step)
+            decoded = decoder(y_wm, E, global_step)
             losses = loss.en_de_loss(wav_matrix, y_wm, msg, decoded)
             #lamda_e = 1.
             #lamda_m = 10
@@ -311,11 +310,10 @@ def main(configs):
 
                 my_step(d_op, lr_sched_d, global_step, train_len)
 
-            decoder_acc = [((decoded[0] >= 0).eq(msg >= 0).sum().float() / msg.numel()).item(),
-                           ((decoded[1] >= 0).eq(msg >= 0).sum().float() / msg.numel()).item()]
+            decoder_acc = [((decoded[0] >= 0).eq(msg == 1).sum().float() / msg.numel()).item(),
+                           ((decoded[1] >= 0).eq(msg == 1).sum().float() / msg.numel()).item()]
             zero_tensor = torch.zeros(wav_matrix.shape).to(device)
-            snr = 10 * torch.log10(
-                mse_loss(wav_matrix.detach(), zero_tensor) / mse_loss(wav_matrix.detach(), y_wm.detach()))
+            snr = 10 * torch.log10(mse_loss(wav_matrix.detach(), zero_tensor) / mse_loss(wav_matrix.detach(), y_wm.detach()))
             norm2 = mse_loss(wav_matrix.detach(), zero_tensor)
 
             # Update averages
@@ -365,7 +363,7 @@ def main(configs):
             # shutil.copyfile(os.path.realpath(__file__), os.path.join(path, os.path.basename(os.path.realpath(__file__)))) # save training scripts
 
         # ---------------- validation
-        with torch.no_grad():
+        with torch.inference_mode():
             encoder.eval()
             decoder.eval()
             discriminator.eval()
@@ -383,10 +381,12 @@ def main(configs):
                 # ---------------- build watermark
                 wav_matrix = sample["matrix"].to(device)
                 msg = generate_random_msg(wav_matrix.size(0), msg_length, device)
-                watermark, carrier_wateramrked = encoder(wav_matrix, msg, global_step)
 
+                watermark_encoded = msg_embedder(msg)
+                E = msg_embedder.embedding_table.weight
+                watermark, carrier_wateramrked = encoder(wav_matrix, watermark_encoded, global_step)
                 y_wm = wav_matrix + watermark
-                decoded = decoder(y_wm, global_step)
+                decoded = decoder(y_wm, E, global_step)
                 losses = loss.en_de_loss(wav_matrix, y_wm, msg, decoded)
                 # adv
                 if train_config["adv"]:
@@ -403,7 +403,8 @@ def main(configs):
                     d_on_encoded = discriminator(y_wm.detach())
                     d_loss_on_encoded = F.binary_cross_entropy_with_logits(d_on_encoded, d_target_label_encoded)
                 
-                decoder_acc = [((decoded[0] >= 0).eq(msg >= 0).sum().float() / msg.numel()).item(), ((decoded[1] >= 0).eq(msg >= 0).sum().float() / msg.numel()).item()]
+                decoder_acc = [((decoded[0] >= 0).eq(msg == 1).sum().float() / msg.numel()).item(),
+                               ((decoded[1] >= 0).eq(msg == 1).sum().float() / msg.numel()).item()]
                 zero_tensor = torch.zeros(wav_matrix.shape).to(device)
                 snr = 10 * torch.log10(mse_loss(wav_matrix.detach(), zero_tensor) / mse_loss(wav_matrix.detach(), y_wm.detach()))
                 val_avg_acc[0] += decoder_acc[0]
@@ -458,9 +459,11 @@ def main(configs):
             # ---------------- build watermark
             wav_matrix = sample["matrix"].to(device)
             msg = generate_random_msg(wav_matrix.size(0), msg_length, device)
-            watermark, carrier_wateramrked = encoder(wav_matrix, msg, global_step)
+            watermark_encoded = msg_embedder(msg)
+            E = msg_embedder.embedding_table.weight
+            watermark, carrier_wateramrked = encoder(wav_matrix, watermark_encoded, global_step)
             y_wm = wav_matrix + watermark
-            decoded = decoder(y_wm, global_step)
+            decoded = decoder(y_wm, E, global_step)
             losses = loss.en_de_loss(wav_matrix, y_wm, msg, decoded)
             # adv
             if train_config["adv"]:
@@ -477,8 +480,8 @@ def main(configs):
                 d_on_encoded = discriminator(y_wm.detach())
                 d_loss_on_encoded = F.binary_cross_entropy_with_logits(d_on_encoded, d_target_label_encoded)
 
-            decoder_acc = [((decoded[0] >= 0).eq(msg >= 0).sum().float() / msg.numel()).item(),
-                           ((decoded[1] >= 0).eq(msg >= 0).sum().float() / msg.numel()).item()]
+            decoder_acc = [((decoded[0] >= 0).eq(msg == 1).sum().float() / msg.numel()).item(),
+                           ((decoded[1] >= 0).eq(msg == 1).sum().float() / msg.numel()).item()]
             zero_tensor = torch.zeros(wav_matrix.shape).to(device)
             snr = 10 * torch.log10(
                 mse_loss(wav_matrix.detach(), zero_tensor) / mse_loss(wav_matrix.detach(), y_wm.detach()))

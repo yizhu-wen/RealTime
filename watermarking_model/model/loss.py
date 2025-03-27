@@ -126,7 +126,9 @@ class TFLoudnessRatio(nn.Module):
 class Loss_identity(nn.Module):
     def __init__(self):
         super(Loss_identity, self).__init__()
-        self.msg_loss = nn.MSELoss()
+        # self.msg_loss = nn.MSELoss()
+        self.msg_loss = nn.BCEWithLogitsLoss()
+        # self.msg_loss= nn.BCELoss()
         self.embedding_loss = nn.MSELoss()
         self.tfloudness_loss = TFLoudnessRatio(n_bands=16)
     
