@@ -334,9 +334,6 @@ class Decoder(nn.Module):
             y_d_d = y_d / (torch.max(torch.abs(y), dim=1, keepdim=True)[0] + 1e-8)
         spect, phase, stft_result = self.stft.transform(y_d_d)
         extracted_wm = self.EX(stft_result).squeeze(1)  # (B, win_dim, length)
-        # Explicitly split the 162-dim vector into two halves of 81-dim each
-        low, high = extracted_wm.chunk(2, dim=1)  # each has shape [B, win_dim / 2, length]
-        h_x = (low + high) / 2  # Average the two halves -> shape: [B, 81, L]
 
         # Infer K and H dynamically
         K = E.shape[0] // 2
@@ -349,28 +346,69 @@ class Decoder(nn.Module):
         #    shape: [num_embeddings, embed_dim] -> [num_embeddings, hidden_dim]
         K = self.W_k(E_reshaped)
         V = self.W_v(E_reshaped)
-        h_x = self.pool(h_x)
-        h_x_dem = self.W_dem(h_x)  # Now shape = [b, H, K]
-        h_x_dem = h_x_dem.transpose(1, 2)  # Now shape = [b, K, H]
-
-        # Project the latent to get Query
-        #    shape: [batch_size, hidden_dim] -> [batch_size, hidden_dim]
-        Q = self.W_q(h_x_dem)
 
         # Single-head cross-attention manually (simplified)
-        #    We need shapes that broadcast: Q -> [B, 1, hidden_dim], K -> [1, N, hidden_dim]
-        K_ = K.unsqueeze(0).repeat(Q.shape[0], 1, 1)   # [1, N, hidden_dim]
-        V_ = V.unsqueeze(0).repeat(Q.shape[0], 1, 1)   # [1, N, hidden_dim]
+        # We need shapes that broadcast: Q -> [B, 1, hidden_dim], K -> [1, N, hidden_dim]
+        K_ = K.unsqueeze(0).repeat(y_d_d.shape[0], 1, 1)   # [1, N, hidden_dim]
+        V_ = V.unsqueeze(0).repeat(y_d_d.shape[0], 1, 1)   # [1, N, hidden_dim]
+
+        # Explicitly split the 162-dim vector into two halves of 81-dim each
+        low, high = extracted_wm.chunk(2, dim=1)  # each has shape [B, win_dim / 2, length]
+
+        h_x_low = self.pool(low)
+        h_x_high = self.pool(high)
+
+        h_x_dem_low = self.W_dem(h_x_low)  # Now shape = [b, H, K]
+        h_x_dem_low = h_x_dem_low.transpose(1, 2)  # Now shape = [b, K, H]
+
+        h_x_dem_high = self.W_dem(h_x_high)  # Now shape = [b, H, K]
+        h_x_dem_high = h_x_dem_high.transpose(1, 2)  # Now shape = [b, K, H]
+
+        Q_low = self.W_q(h_x_dem_low)
+        Q_high = self.W_q(h_x_dem_high)
 
         # Compute attention logits: [B, K, H] x [B, H, K] -> [B, K, K]
-        attn_logits = torch.bmm(Q, K_.transpose(1, 2))  # shape [B, K, K]
-        attn_weights = F.softmax(attn_logits / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
+        attn_logits_low = torch.bmm(Q_low, K_.transpose(1, 2))  # shape [B, K, K]
+        attn_weights_low = F.softmax(attn_logits_low / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
+
+        attn_logits_high = torch.bmm(Q_high, K_.transpose(1, 2))  # shape [B, K, K]
+        attn_weights_high = F.softmax(attn_logits_high / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
 
         # Weighted sum for context: [B, K, K] x [B, K, H] -> [B, H, H]
-        context = torch.bmm(attn_weights, V_)  # [B, H, H]
+        context_low = torch.bmm(attn_weights_low, V_)  # [B, H, H]
+        context_high = torch.bmm(attn_weights_high, V_)  # [B, H, H]
 
-        V_x = self.elu(context)
-        msg = self.msg_linear_out(V_x).transpose(1, 2)
+        V_x_low = self.elu(context_low)
+        V_x_high = self.elu(context_high)
+
+        V_x_avg = (V_x_low + V_x_high) / 2
+
+        msg = self.msg_linear_out(V_x_avg).transpose(1, 2)
+
+        # low_msg = self.msg_linear_out(V_x_low).transpose(1, 2)
+        # high_msg = self.msg_linear_out(V_x_high).transpose(1, 2)
+        #
+        # msg_avg = (low_msg + high_msg) / 2  # Average the two halves -> shape: [B, 1, 81]
+        #
+        # h_x = (low + high) / 2  # Average the two halves -> shape: [B, 81, L]
+        #
+        # h_x = self.pool(h_x)
+        # h_x_dem = self.W_dem(h_x)  # Now shape = [b, H, K]
+        # h_x_dem = h_x_dem.transpose(1, 2)  # Now shape = [b, K, H]
+        #
+        # # Project the latent to get Query
+        # #    shape: [batch_size, hidden_dim] -> [batch_size, hidden_dim]
+        # Q = self.W_q(h_x_dem)
+        #
+        # # Compute attention logits: [B, K, H] x [B, H, K] -> [B, K, K]
+        # attn_logits = torch.bmm(Q, K_.transpose(1, 2))  # shape [B, K, K]
+        # attn_weights = F.softmax(attn_logits / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
+        #
+        # # Weighted sum for context: [B, K, K] x [B, K, H] -> [B, H, H]
+        # context = torch.bmm(attn_weights, V_)  # [B, H, H]
+        #
+        # V_x = self.elu(context)
+        # msg = self.msg_linear_out(V_x).transpose(1, 2)
 
         # low_msg = torch.mean(low, dim=2, keepdim=True).transpose(1,2)
         # high_msg = torch.mean(high, dim=2, keepdim=True).transpose(1, 2)
@@ -382,30 +420,61 @@ class Decoder(nn.Module):
         extracted_wm_identity = self.EX(stft_result_identity).squeeze(1)
         low_identity, high_identity = extracted_wm_identity.chunk(2, dim=1)  # each has shape [B, win_dim / 2, length]
 
-        h_x_identity = (low_identity + high_identity) / 2  # Average the two halves -> shape: [B, 81, L]
+        h_x_low_identity = self.pool(low_identity)
+        h_x_high_identity = self.pool(high_identity)
 
-        h_x_identity = self.pool(h_x_identity)
-        h_x_dem_identity = self.W_dem(h_x_identity)  # Now shape = [b, H, K]
-        h_x_dem_identity = h_x_dem_identity.transpose(1, 2)  # Now shape = [b, K, H]
+        h_x_dem_low_identity = self.W_dem(h_x_low_identity)  # Now shape = [b, H, K]
+        h_x_dem_low_identity = h_x_dem_low_identity.transpose(1, 2)  # Now shape = [b, K, H]
 
-        # Project the latent to get Query
-        #    shape: [batch_size, hidden_dim] -> [batch_size, hidden_dim]
-        Q = self.W_q(h_x_dem_identity)
+        h_x_dem_high_identity = self.W_dem(h_x_high_identity)  # Now shape = [b, H, K]
+        h_x_dem_high_identity = h_x_dem_high_identity.transpose(1, 2)  # Now shape = [b, K, H]
 
-        # Single-head cross-attention manually (simplified)
-        #    We need shapes that broadcast: Q -> [B, 1, hidden_dim], K -> [1, N, hidden_dim]
-        K_ = K.unsqueeze(0).repeat(Q.shape[0], 1, 1)  # [1, N, hidden_dim]
-        V_ = V.unsqueeze(0).repeat(Q.shape[0], 1, 1)  # [1, N, hidden_dim]
+        Q_low_identity = self.W_q(h_x_dem_low_identity)
+        Q_high_identity = self.W_q(h_x_dem_high_identity)
 
         # Compute attention logits: [B, K, H] x [B, H, K] -> [B, K, K]
-        attn_logits = torch.bmm(Q, K_.transpose(1, 2))  # shape [B, K, K]
-        attn_weights = F.softmax(attn_logits / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
+        attn_logits_low_identity = torch.bmm(Q_low_identity, K_.transpose(1, 2))  # shape [B, K, K]
+        attn_weights_low_identity = F.softmax(attn_logits_low_identity / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
+
+        attn_logits_high_identity = torch.bmm(Q_high_identity, K_.transpose(1, 2))  # shape [B, K, K]
+        attn_weights_high_identity = F.softmax(attn_logits_high_identity / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
 
         # Weighted sum for context: [B, K, K] x [B, K, H] -> [B, H, H]
-        context = torch.bmm(attn_weights, V_)  # [B, H, H]
+        context_low_identity = torch.bmm(attn_weights_low_identity, V_)  # [B, H, H]
+        context_high_identity = torch.bmm(attn_weights_high_identity, V_)  # [B, H, H]
 
-        V_x = self.elu(context)
-        msg_identity = self.msg_linear_out(V_x).transpose(1, 2)
+        V_x_low_identity = self.elu(context_low_identity)
+        V_x_high_identity = self.elu(context_high_identity)
+
+        V_x_avg_identity = (V_x_low_identity + V_x_high_identity) / 2
+
+        msg_identity = self.msg_linear_out(V_x_avg_identity).transpose(1, 2)
+
+
+        # h_x_identity = (low_identity + high_identity) / 2  # Average the two halves -> shape: [B, 81, L]
+        #
+        # h_x_identity = self.pool(h_x_identity)
+        # h_x_dem_identity = self.W_dem(h_x_identity)  # Now shape = [b, H, K]
+        # h_x_dem_identity = h_x_dem_identity.transpose(1, 2)  # Now shape = [b, K, H]
+        #
+        # # Project the latent to get Query
+        # #    shape: [batch_size, hidden_dim] -> [batch_size, hidden_dim]
+        # Q = self.W_q(h_x_dem_identity)
+        #
+        # # Single-head cross-attention manually (simplified)
+        # #    We need shapes that broadcast: Q -> [B, 1, hidden_dim], K -> [1, N, hidden_dim]
+        # K_ = K.unsqueeze(0).repeat(Q.shape[0], 1, 1)  # [1, N, hidden_dim]
+        # V_ = V.unsqueeze(0).repeat(Q.shape[0], 1, 1)  # [1, N, hidden_dim]
+        #
+        # # Compute attention logits: [B, K, H] x [B, H, K] -> [B, K, K]
+        # attn_logits = torch.bmm(Q, K_.transpose(1, 2))  # shape [B, K, K]
+        # attn_weights = F.softmax(attn_logits / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
+        #
+        # # Weighted sum for context: [B, K, K] x [B, K, H] -> [B, H, H]
+        # context = torch.bmm(attn_weights, V_)  # [B, H, H]
+        #
+        # V_x = self.elu(context)
+        # msg_identity = self.msg_linear_out(V_x).transpose(1, 2)
 
         # low_msg_identity = torch.mean(low_identity, dim=2, keepdim=True).transpose(1, 2)
         # high_msg_identity = torch.mean(high_identity, dim=2, keepdim=True).transpose(1, 2)

@@ -16,7 +16,7 @@ import omegaconf
 class distortion(nn.Module):
     def __init__(self, process_config, train_config):
         super(distortion, self).__init__()
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
         self.sample_rate = process_config["audio"]["or_sample_rate"]
         self.resample_kernel1 = julius.ResampleFrac(self.sample_rate, 16000).to(self.device)
         self.resample_kernel1_re = julius.ResampleFrac(16000, self.sample_rate).to(self.device)
