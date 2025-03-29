@@ -564,7 +564,7 @@ class fixed_STFT(torch.nn.Module):
                 np.where(window_sum > tiny(window_sum))[0])
             window_sum = torch.autograd.Variable(
                 torch.from_numpy(window_sum), requires_grad=False)
-            window_sum = window_sum.to("cuda:7") if magnitude.is_cuda else window_sum
+            window_sum = window_sum.to("cuda:0") if magnitude.is_cuda else window_sum
             inverse_transform[:, :, approx_nonzero_indices] /= window_sum[approx_nonzero_indices]
 
             # scale by hop ratio

@@ -116,7 +116,7 @@ aug_weights:
 n_max_aug: null
 
 wandb:
-  enabled: true  # Set to true to enable wandb logging
+  enabled: false  # Set to true to enable wandb logging
   project: "real-time-voice-watermark"
   name: "FullSet"
   key: "9a11e5364efe3bb8fedb3741188ee0d714e942e2"

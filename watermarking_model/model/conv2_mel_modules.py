@@ -220,17 +220,16 @@ class Encoder(nn.Module):
         # 32800 // hop_length + 1 = 201 center=True
         # 0.5s*16000 = 8000
         # 8000 // hop_length + 1 = 51 center=True
-        voice_prefilling = int((2.00*self.sampling_rate)//self.hop_length + 1)
         # Predict future 0.5s watermark
         # 0.5*16000 = 8000
         # 8000 // hop_length + 1 =51
-        max_start = stft_result.shape[-1] - (voice_prefilling + self.delay_amt)
+        max_start = stft_result.shape[-1] - (self.prefilling_amt + self.delay_amt)
         if int(max_start / self.delay_amt) <= 0:
             return None  # Not enough frames for a chunk
 
         list_of_watermarks = []
-        for i in range(int((stft_result.shape[-1] - (voice_prefilling + self.delay_amt)) / self.future_amt)):
-            carrier_encoded = self.ENc(stft_result[:, :, :, i * self.future_amt:voice_prefilling + i * self.future_amt])
+        for i in range(int((stft_result.shape[-1] - (self.prefilling_amt + self.delay_amt)) / self.future_amt)):
+            carrier_encoded = self.ENc(stft_result[:, :, :, i * self.future_amt:self.prefilling_amt + i * self.future_amt])
             # torch.Size([B, 1, 81])
             # torch.Size([B, 81, 1])
             # torch.Size([B, 1, 81, 1])
@@ -239,7 +238,7 @@ class Encoder(nn.Module):
             #                                                                                 carrier_encoded.shape[3])
 
             concatenated_feature = torch.cat((carrier_encoded, stft_result[:, :, :,
-                                                               i*self.future_amt:voice_prefilling + i*self.future_amt], watermark_encoded), dim=1)
+                                                               i*self.future_amt:self.prefilling_amt + i*self.future_amt], watermark_encoded), dim=1)
             # [B, 2, bins, length]
             # Embed the watermark
             carrier_watermarked = self.EM(concatenated_feature)
@@ -249,7 +248,7 @@ class Encoder(nn.Module):
         if len(list_of_watermarks) > 0:
             watermark = torch.cat(list_of_watermarks, dim=-1)
             all_watermark_stft = self.pad_w_zero_stft(
-                stft_result, watermark, voice_prefilling
+                stft_result, watermark, self.prefilling_amt
             )
             del list_of_watermarks
             mask=stft_result!=0
@@ -305,6 +304,8 @@ class Decoder(nn.Module):
         self.nbits = train_config["watermark"]["length"]
         self.win_dim = int((process_config["mel"]["n_fft"] / 2) + 1)
         self.hop_length = process_config["mel"]["hop_length"]
+        self.sampling_rate = process_config["audio"]["or_sample_rate"]
+        self.future_amt = int(train_config["watermark"]["future_amt_second"] * self.sampling_rate // self.hop_length + 1)
         self.block = model_config["conv2"]["block"]
         self.EX = WatermarkExtracter(input_channel=2, hidden_dim=model_config["conv2"]["hidden_dim"], block=self.block)
         self.stft = fixed_STFT(process_config["mel"]["n_fft"], process_config["mel"]["hop_length"], process_config["mel"]["win_length"])
@@ -316,6 +317,7 @@ class Decoder(nn.Module):
         self.W_v = nn.Linear(2*self.hidden, self.hidden)
 
         self.W_dem = nn.Linear(self.nbits, self.nbits)
+        self.W_dem_chunk = nn.Linear(self.future_amt, self.nbits)
         self.pool = nn.AdaptiveAvgPool1d(self.nbits)
         self.elu = nn.ELU(alpha=1.0, inplace=True)
 
@@ -332,8 +334,6 @@ class Decoder(nn.Module):
             y_d_d = self.dl(y_d, self.robust)
         else:
             y_d_d = y_d / (torch.max(torch.abs(y), dim=1, keepdim=True)[0] + 1e-8)
-        spect, phase, stft_result = self.stft.transform(y_d_d)
-        extracted_wm = self.EX(stft_result).squeeze(1)  # (B, win_dim, length)
 
         # Infer K and H dynamically
         K = E.shape[0] // 2
@@ -352,38 +352,111 @@ class Decoder(nn.Module):
         K_ = K.unsqueeze(0).repeat(y_d_d.shape[0], 1, 1)   # [1, N, hidden_dim]
         V_ = V.unsqueeze(0).repeat(y_d_d.shape[0], 1, 1)   # [1, N, hidden_dim]
 
+        spect, phase, stft_result = self.stft.transform(y_d_d)
+        extracted_wm = self.EX(stft_result).squeeze(1)  # (B, win_dim, length)
         # Explicitly split the 162-dim vector into two halves of 81-dim each
         low, high = extracted_wm.chunk(2, dim=1)  # each has shape [B, win_dim / 2, length]
 
-        h_x_low = self.pool(low)
-        h_x_high = self.pool(high)
+        _, _, stft_result_identity = self.stft.transform(y_identity)
+        extracted_wm_identity = self.EX(stft_result_identity).squeeze(1)
+        low_identity, high_identity = extracted_wm_identity.chunk(2, dim=1)  # each has shape [B, win_dim / 2, length]
 
-        h_x_dem_low = self.W_dem(h_x_low)  # Now shape = [b, H, K]
-        h_x_dem_low = h_x_dem_low.transpose(1, 2)  # Now shape = [b, K, H]
+        V_x_chunks = []
+        V_x_chunks_identity = []
+        for i in range(int(extracted_wm.shape[-1]/self.future_amt)):
+            h_x_dem_low_chunk = self.W_dem_chunk(low[:,:,i*self.future_amt:i*self.future_amt+self.future_amt])
+            h_x_dem_high_chunk = self.W_dem_chunk(high[:, :, i*self.future_amt:i*self.future_amt + self.future_amt])
 
-        h_x_dem_high = self.W_dem(h_x_high)  # Now shape = [b, H, K]
-        h_x_dem_high = h_x_dem_high.transpose(1, 2)  # Now shape = [b, K, H]
+            h_x_dem_low_chunk = h_x_dem_low_chunk.transpose(1, 2)
+            h_x_dem_high_chunk = h_x_dem_high_chunk.transpose(1, 2)
+            Q_low_chunk = self.W_q(h_x_dem_low_chunk)
+            Q_high_chunk = self.W_q(h_x_dem_high_chunk)
 
-        Q_low = self.W_q(h_x_dem_low)
-        Q_high = self.W_q(h_x_dem_high)
+            # Compute attention logits: [B, K, H] x [B, H, K] -> [B, K, K]
+            attn_logits_low_chunk = torch.bmm(Q_low_chunk, K_.transpose(1, 2))  # shape [B, K, K]
+            attn_weights_low_chunk = F.softmax(attn_logits_low_chunk / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
 
-        # Compute attention logits: [B, K, H] x [B, H, K] -> [B, K, K]
-        attn_logits_low = torch.bmm(Q_low, K_.transpose(1, 2))  # shape [B, K, K]
-        attn_weights_low = F.softmax(attn_logits_low / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
+            attn_logits_high_chunk = torch.bmm(Q_high_chunk, K_.transpose(1, 2))  # shape [B, K, K]
+            attn_weights_high_chunk = F.softmax(attn_logits_high_chunk / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
 
-        attn_logits_high = torch.bmm(Q_high, K_.transpose(1, 2))  # shape [B, K, K]
-        attn_weights_high = F.softmax(attn_logits_high / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
+            # Weighted sum for context: [B, K, K] x [B, K, H] -> [B, H, H]
+            context_low_chunk = torch.bmm(attn_weights_low_chunk, V_)  # [B, H, H]
+            context_high_chunk = torch.bmm(attn_weights_high_chunk, V_)  # [B, H, H]
 
-        # Weighted sum for context: [B, K, K] x [B, K, H] -> [B, H, H]
-        context_low = torch.bmm(attn_weights_low, V_)  # [B, H, H]
-        context_high = torch.bmm(attn_weights_high, V_)  # [B, H, H]
+            V_x_low_chunk = self.elu(context_low_chunk)
+            V_x_high_chunk = self.elu(context_high_chunk)
 
-        V_x_low = self.elu(context_low)
-        V_x_high = self.elu(context_high)
+            V_x_dem_low_chunk = self.msg_linear_out(V_x_low_chunk).transpose(1, 2)
+            V_x_dem_high_chunk = self.msg_linear_out(V_x_high_chunk).transpose(1, 2)
 
-        V_x_avg = (V_x_low + V_x_high) / 2
+            V_x_avg_chunk = (V_x_dem_low_chunk + V_x_dem_high_chunk) / 2
+            V_x_chunks.append(V_x_avg_chunk)
 
-        msg = self.msg_linear_out(V_x_avg).transpose(1, 2)
+            # Identity
+            h_x_dem_low_chunk_identity = self.W_dem_chunk(low_identity[:, :, i * self.future_amt:i * self.future_amt + self.future_amt])
+            h_x_dem_high_chunk_identity = self.W_dem_chunk(high_identity[:, :, i * self.future_amt:i * self.future_amt + self.future_amt])
+
+            h_x_dem_low_chunk_identity = h_x_dem_low_chunk_identity.transpose(1, 2)
+            h_x_dem_high_chunk_identity = h_x_dem_high_chunk_identity.transpose(1, 2)
+            Q_low_chunk_identity = self.W_q(h_x_dem_low_chunk_identity)
+            Q_high_chunk_identity = self.W_q(h_x_dem_high_chunk_identity)
+
+            # Compute attention logits: [B, K, H] x [B, H, K] -> [B, K, K]
+            attn_logits_low_chunk_identity = torch.bmm(Q_low_chunk_identity, K_.transpose(1, 2))  # shape [B, K, K]
+            attn_weights_low_chunk_identity = F.softmax(attn_logits_low_chunk_identity / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
+
+            attn_logits_high_chunk_identity = torch.bmm(Q_high_chunk_identity, K_.transpose(1, 2))  # shape [B, K, K]
+            attn_weights_high_chunk_identity = F.softmax(attn_logits_high_chunk_identity / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
+
+            # Weighted sum for context: [B, K, K] x [B, K, H] -> [B, H, H]
+            context_low_chunk_identity = torch.bmm(attn_weights_low_chunk_identity, V_)  # [B, H, H]
+            context_high_chunk_identity = torch.bmm(attn_weights_high_chunk_identity, V_)  # [B, H, H]
+
+            V_x_low_chunk_identity = self.elu(context_low_chunk_identity)
+            V_x_high_chunk_identity = self.elu(context_high_chunk_identity)
+
+            V_x_dem_low_chunk_identity = self.msg_linear_out(V_x_low_chunk_identity).transpose(1, 2)
+            V_x_dem_high_chunk_identity = self.msg_linear_out(V_x_high_chunk_identity).transpose(1, 2)
+
+            V_x_avg_chunk_identity = (V_x_dem_low_chunk_identity + V_x_dem_high_chunk_identity) / 2
+            V_x_chunks_identity.append(V_x_avg_chunk_identity)
+
+        # Stack the chunk predictions and average over the chunk dimension
+        V_x_avg = torch.stack(V_x_chunks, dim=0)  # shape: [num_chunks, B, 1, K]
+        msg = torch.mean(V_x_avg, dim=0)  # shape: [B, 1, K]
+
+        V_x_avg_identity = torch.stack(V_x_chunks_identity, dim=0)  # shape: [num_chunks, B, 1, K]
+        msg_identity = torch.mean(V_x_avg_identity, dim=0)  # shape: [B, 1, K]
+
+        # h_x_low = self.pool(low)
+        # h_x_high = self.pool(high)
+        #
+        # h_x_dem_low = self.W_dem(h_x_low)  # Now shape = [b, H, K]
+        # h_x_dem_low = h_x_dem_low.transpose(1, 2)  # Now shape = [b, K, H]
+        #
+        # h_x_dem_high = self.W_dem(h_x_high)  # Now shape = [b, H, K]
+        # h_x_dem_high = h_x_dem_high.transpose(1, 2)  # Now shape = [b, K, H]
+        #
+        # Q_low = self.W_q(h_x_dem_low)
+        # Q_high = self.W_q(h_x_dem_high)
+        #
+        # # Compute attention logits: [B, K, H] x [B, H, K] -> [B, K, K]
+        # attn_logits_low = torch.bmm(Q_low, K_.transpose(1, 2))  # shape [B, K, K]
+        # attn_weights_low = F.softmax(attn_logits_low / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
+        #
+        # attn_logits_high = torch.bmm(Q_high, K_.transpose(1, 2))  # shape [B, K, K]
+        # attn_weights_high = F.softmax(attn_logits_high / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
+        #
+        # # Weighted sum for context: [B, K, K] x [B, K, H] -> [B, H, H]
+        # context_low = torch.bmm(attn_weights_low, V_)  # [B, H, H]
+        # context_high = torch.bmm(attn_weights_high, V_)  # [B, H, H]
+        #
+        # V_x_low = self.elu(context_low)
+        # V_x_high = self.elu(context_high)
+        #
+        # V_x_avg = (V_x_low + V_x_high) / 2
+        #
+        # msg = self.msg_linear_out(V_x_avg).transpose(1, 2)
 
         # low_msg = self.msg_linear_out(V_x_low).transpose(1, 2)
         # high_msg = self.msg_linear_out(V_x_high).transpose(1, 2)
@@ -416,39 +489,35 @@ class Decoder(nn.Module):
         # # msg = torch.mean(extracted_wm, dim=2, keepdim=True).transpose(1,2)
         # msg = self.msg_linear_out(msg_avg)
 
-        _, _, stft_result_identity = self.stft.transform(y_identity)
-        extracted_wm_identity = self.EX(stft_result_identity).squeeze(1)
-        low_identity, high_identity = extracted_wm_identity.chunk(2, dim=1)  # each has shape [B, win_dim / 2, length]
+        # h_x_low_identity = self.pool(low_identity)
+        # h_x_high_identity = self.pool(high_identity)
+        #
+        # h_x_dem_low_identity = self.W_dem(h_x_low_identity)  # Now shape = [b, H, K]
+        # h_x_dem_low_identity = h_x_dem_low_identity.transpose(1, 2)  # Now shape = [b, K, H]
+        #
+        # h_x_dem_high_identity = self.W_dem(h_x_high_identity)  # Now shape = [b, H, K]
+        # h_x_dem_high_identity = h_x_dem_high_identity.transpose(1, 2)  # Now shape = [b, K, H]
+        #
+        # Q_low_identity = self.W_q(h_x_dem_low_identity)
+        # Q_high_identity = self.W_q(h_x_dem_high_identity)
+        #
+        # # Compute attention logits: [B, K, H] x [B, H, K] -> [B, K, K]
+        # attn_logits_low_identity = torch.bmm(Q_low_identity, K_.transpose(1, 2))  # shape [B, K, K]
+        # attn_weights_low_identity = F.softmax(attn_logits_low_identity / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
+        #
+        # attn_logits_high_identity = torch.bmm(Q_high_identity, K_.transpose(1, 2))  # shape [B, K, K]
+        # attn_weights_high_identity = F.softmax(attn_logits_high_identity / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
+        #
+        # # Weighted sum for context: [B, K, K] x [B, K, H] -> [B, H, H]
+        # context_low_identity = torch.bmm(attn_weights_low_identity, V_)  # [B, H, H]
+        # context_high_identity = torch.bmm(attn_weights_high_identity, V_)  # [B, H, H]
+        #
+        # V_x_low_identity = self.elu(context_low_identity)
+        # V_x_high_identity = self.elu(context_high_identity)
+        #
+        # V_x_avg_identity = (V_x_low_identity + V_x_high_identity) / 2
 
-        h_x_low_identity = self.pool(low_identity)
-        h_x_high_identity = self.pool(high_identity)
-
-        h_x_dem_low_identity = self.W_dem(h_x_low_identity)  # Now shape = [b, H, K]
-        h_x_dem_low_identity = h_x_dem_low_identity.transpose(1, 2)  # Now shape = [b, K, H]
-
-        h_x_dem_high_identity = self.W_dem(h_x_high_identity)  # Now shape = [b, H, K]
-        h_x_dem_high_identity = h_x_dem_high_identity.transpose(1, 2)  # Now shape = [b, K, H]
-
-        Q_low_identity = self.W_q(h_x_dem_low_identity)
-        Q_high_identity = self.W_q(h_x_dem_high_identity)
-
-        # Compute attention logits: [B, K, H] x [B, H, K] -> [B, K, K]
-        attn_logits_low_identity = torch.bmm(Q_low_identity, K_.transpose(1, 2))  # shape [B, K, K]
-        attn_weights_low_identity = F.softmax(attn_logits_low_identity / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
-
-        attn_logits_high_identity = torch.bmm(Q_high_identity, K_.transpose(1, 2))  # shape [B, K, K]
-        attn_weights_high_identity = F.softmax(attn_logits_high_identity / (self.hidden ** 0.5), dim=-1)  # [B, K, K]
-
-        # Weighted sum for context: [B, K, K] x [B, K, H] -> [B, H, H]
-        context_low_identity = torch.bmm(attn_weights_low_identity, V_)  # [B, H, H]
-        context_high_identity = torch.bmm(attn_weights_high_identity, V_)  # [B, H, H]
-
-        V_x_low_identity = self.elu(context_low_identity)
-        V_x_high_identity = self.elu(context_high_identity)
-
-        V_x_avg_identity = (V_x_low_identity + V_x_high_identity) / 2
-
-        msg_identity = self.msg_linear_out(V_x_avg_identity).transpose(1, 2)
+        # msg_identity = self.msg_linear_out(V_x_avg_identity).transpose(1, 2)
 
 
         # h_x_identity = (low_identity + high_identity) / 2  # Average the two halves -> shape: [B, 81, L]
