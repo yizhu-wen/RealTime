@@ -363,6 +363,10 @@ class Decoder(nn.Module):
 
         V_x_chunks = []
         V_x_chunks_identity = []
+        V_x_chunks_low = []
+        V_x_chunks_high = []
+        V_x_chunks_identity_low_identity = []
+        V_x_chunks_identity_high_identity = []
         for i in range(int(extracted_wm.shape[-1]/self.future_amt)):
             h_x_dem_low_chunk = self.W_dem_chunk(low[:,:,i*self.future_amt:i*self.future_amt+self.future_amt])
             h_x_dem_high_chunk = self.W_dem_chunk(high[:, :, i*self.future_amt:i*self.future_amt + self.future_amt])
@@ -389,8 +393,11 @@ class Decoder(nn.Module):
             V_x_dem_low_chunk = self.msg_linear_out(V_x_low_chunk).transpose(1, 2)
             V_x_dem_high_chunk = self.msg_linear_out(V_x_high_chunk).transpose(1, 2)
 
-            V_x_avg_chunk = (V_x_dem_low_chunk + V_x_dem_high_chunk) / 2
-            V_x_chunks.append(V_x_avg_chunk)
+            V_x_chunks_low.append(V_x_dem_low_chunk)
+            V_x_chunks_high.append(V_x_dem_high_chunk)
+
+            # V_x_avg_chunk = (V_x_dem_low_chunk + V_x_dem_high_chunk) / 2
+            # V_x_chunks.append(V_x_avg_chunk)
 
             # Identity
             h_x_dem_low_chunk_identity = self.W_dem_chunk(low_identity[:, :, i * self.future_amt:i * self.future_amt + self.future_amt])
@@ -418,15 +425,27 @@ class Decoder(nn.Module):
             V_x_dem_low_chunk_identity = self.msg_linear_out(V_x_low_chunk_identity).transpose(1, 2)
             V_x_dem_high_chunk_identity = self.msg_linear_out(V_x_high_chunk_identity).transpose(1, 2)
 
-            V_x_avg_chunk_identity = (V_x_dem_low_chunk_identity + V_x_dem_high_chunk_identity) / 2
-            V_x_chunks_identity.append(V_x_avg_chunk_identity)
+            # V_x_avg_chunk_identity = (V_x_dem_low_chunk_identity + V_x_dem_high_chunk_identity) / 2
+            # V_x_chunks_identity.append(V_x_avg_chunk_identity)
 
-        # Stack the chunk predictions and average over the chunk dimension
-        V_x_avg = torch.stack(V_x_chunks, dim=0)  # shape: [num_chunks, B, 1, K]
-        msg = torch.mean(V_x_avg, dim=0)  # shape: [B, 1, K]
+            V_x_chunks_identity_low_identity.append(V_x_dem_low_chunk_identity)
+            V_x_chunks_identity_high_identity.append(V_x_dem_high_chunk_identity)
 
-        V_x_avg_identity = torch.stack(V_x_chunks_identity, dim=0)  # shape: [num_chunks, B, 1, K]
-        msg_identity = torch.mean(V_x_avg_identity, dim=0)  # shape: [B, 1, K]
+        V_x_avg_low = torch.stack(V_x_chunks_low, dim=0).mean(dim=0)  # shape: [num_chunks, B, 1, K]
+        V_x_avg_high = torch.stack(V_x_chunks_high, dim=0).mean(dim=0)  # shape: [num_chunks, B, 1, K]
+
+        V_x_avg_low_identity = torch.stack(V_x_chunks_identity_low_identity, dim=0).mean(dim=0)  # shape: [num_chunks, B, 1, K]
+        V_x_avg_high_identity = torch.stack(V_x_chunks_identity_high_identity, dim=0).mean(dim=0)  # shape: [num_chunks, B, 1, K]
+
+        msg = (V_x_avg_low + V_x_avg_high)/2  # shape: [B, 1, K]
+        msg_identity = (V_x_avg_low_identity + V_x_avg_high_identity)/2
+
+        # # Stack the chunk predictions and average over the chunk dimension
+        # V_x_avg = torch.stack(V_x_chunks, dim=0)  # shape: [num_chunks, B, 1, K]
+        # msg = torch.mean(V_x_avg, dim=0)  # shape: [B, 1, K]
+
+        # V_x_avg_identity = torch.stack(V_x_chunks_identity, dim=0)  # shape: [num_chunks, B, 1, K]
+        # msg_identity = torch.mean(V_x_avg_identity, dim=0)  # shape: [B, 1, K]
 
         # h_x_low = self.pool(low)
         # h_x_high = self.pool(high)
