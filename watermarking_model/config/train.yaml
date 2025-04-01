@@ -42,9 +42,9 @@ optimize:
 iter:
   epoch: 25
   # epoch: 100
-  save_circle: 20
-  show_circle: 1000
-  val_circle: 1000
+  save_circle: 5
+  show_circle: 300
+  val_circle: 300
   data_divider: 1
   test_record_num: 100
   num_save_img: 10
@@ -91,7 +91,7 @@ audio_effects:
     lowpass_freq: null # don't apply low pass freq to ffmpeg aac compression
   encodec:
     ckpt: "//pretrained/facebook/encodec_24khz"
-    n_bandwidth: [3, 6, 12, 24]  # corresponds to n_qs [4, 8, 16, 32]
+    n_bandwidths: [3, 6, 12, 24]  # corresponds to n_qs [4, 8, 16, 32]
 
 select_aug_mode:
   "use_eval" # other are 'all' and 'use_eval_acc', used to sample augmentations, `fixed` uses the prob from aug_weights, `all` uses all agmentations every step

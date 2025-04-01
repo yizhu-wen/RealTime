@@ -16,7 +16,7 @@ import omegaconf
 class distortion(nn.Module):
     def __init__(self, process_config, train_config):
         super(distortion, self).__init__()
-        self.device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.sample_rate = process_config["audio"]["or_sample_rate"]
         self.resample_kernel1 = julius.ResampleFrac(self.sample_rate, 16000).to(self.device)
         self.resample_kernel1_re = julius.ResampleFrac(16000, self.sample_rate).to(self.device)
@@ -309,4 +309,30 @@ class distortion(nn.Module):
         else:
             y = y.clamp(-1, 1)
         return y
+
+
+def encodec_transformation(encodec, y, n_bandwidths, sample_rate):
+    encodec_output_list = []
+
+    # Ensure y is (B, C=1, T)
+    if y.dim() == 2:  # (B, T)
+        y = y.unsqueeze(1)  # -> (B, 1, T)
+    elif y.dim() != 3:
+        raise ValueError(f"Expected input of shape (B, T) or (B, 1, T), but got {y.shape}")
+
+    for n_bandwidth in n_bandwidths:
+        encodec.set_target_bandwidth(n_bandwidth)
+
+        # Resample to Encodec sample rate
+        y_resampled = julius.resample_frac(y, old_sr=sample_rate, new_sr=encodec.sample_rate)
+
+        # Encode and decode
+        compressed = encodec(y_resampled)
+        y_d = julius.resample_frac(
+            compressed, old_sr=encodec.sample_rate, new_sr=sample_rate
+        )
+
+        encodec_output_list.append(y_d)
+
+    return encodec_output_list
 

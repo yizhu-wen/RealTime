@@ -475,7 +475,6 @@ class TacotronSTFT(torch.nn.Module):
         return mel_output
 
 
-
 class fixed_STFT(torch.nn.Module):
     """adapted from Prem Seetharaman's https://github.com/pseeth/pytorch-stft"""
     def __init__(self, filter_length=320, hop_length=160, win_length=320,
@@ -564,7 +563,7 @@ class fixed_STFT(torch.nn.Module):
                 np.where(window_sum > tiny(window_sum))[0])
             window_sum = torch.autograd.Variable(
                 torch.from_numpy(window_sum), requires_grad=False)
-            window_sum = window_sum.to("cuda:7") if magnitude.is_cuda else window_sum
+            window_sum = window_sum.to("cuda:0") if magnitude.is_cuda else window_sum
             inverse_transform[:, :, approx_nonzero_indices] /= window_sum[approx_nonzero_indices]
 
             # scale by hop ratio

@@ -140,6 +140,15 @@ class Loss_identity(nn.Module):
         return embedding_loss, msg_loss, loudness_loss
 
 
+def encodec_loss_fn(decoded_msgs, msg):
+    bce_loss = nn.BCEWithLogitsLoss()
+    total_loss = 0.0
+    for decoded_msg in decoded_msgs:
+        loss = bce_loss(decoded_msg, msg)
+        total_loss += loss
+    return total_loss
+
+
 # class Loss_identity_3(nn.Module):
 #     def __init__(self, train_config):
 #         super(Loss_identity_3, self).__init__()
