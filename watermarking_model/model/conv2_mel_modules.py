@@ -342,7 +342,7 @@ class Decoder(nn.Module):
                 msg_encodec_list = []
                 for reconstructed_waveform in encodec_output_list:
                     # Remove extra dimensions if possible.
-                    rec_wave = reconstructed_waveform.squeeze()
+                    rec_wave = reconstructed_waveform.squeeze(1)
                     # Compute STFT and extract watermark features.
                     _, _, stft_result = self.stft.transform(rec_wave)
                     extracted_wm = self.EX(stft_result).squeeze(1)
