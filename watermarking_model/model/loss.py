@@ -142,10 +142,13 @@ class Loss_identity(nn.Module):
 
 def encodec_loss_fn(decoded_msgs, msg):
     bce_loss = nn.BCEWithLogitsLoss()
-    total_loss = 0.0
+    # Initialize total_loss as a tensor on the correct device.
+    total_loss = torch.tensor(0.0, device=msg.device)
     for decoded_msg in decoded_msgs:
         loss = bce_loss(decoded_msg, msg)
         total_loss += loss
+    # Average the loss by dividing by the number of decoded messages.
+    total_loss = total_loss / len(decoded_msgs) if decoded_msgs else total_loss
     return total_loss
 
 
