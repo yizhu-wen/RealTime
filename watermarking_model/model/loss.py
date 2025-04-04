@@ -126,8 +126,8 @@ class TFLoudnessRatio(nn.Module):
 class Loss_identity(nn.Module):
     def __init__(self):
         super(Loss_identity, self).__init__()
-        # self.msg_loss = nn.MSELoss()
-        self.msg_loss = nn.BCEWithLogitsLoss()
+        self.msg_loss = nn.MSELoss()
+        # self.msg_loss = nn.BCEWithLogitsLoss()
         # self.msg_loss= nn.BCELoss()
         self.embedding_loss = nn.MSELoss()
         self.tfloudness_loss = TFLoudnessRatio(n_bands=16)
@@ -141,11 +141,12 @@ class Loss_identity(nn.Module):
 
 
 def encodec_loss_fn(decoded_msgs, msg):
-    bce_loss = nn.BCEWithLogitsLoss()
+    # encodec_msg_loss = nn.BCEWithLogitsLoss()
+    encodec_msg_loss = nn.MSELoss()
     # Initialize total_loss as a tensor on the correct device.
     total_loss = torch.tensor(0.0, device=msg.device)
     for decoded_msg in decoded_msgs:
-        loss = bce_loss(decoded_msg, msg)
+        loss = encodec_msg_loss(msg, decoded_msg)
         total_loss += loss
     # Average the loss by dividing by the number of decoded messages.
     total_loss = total_loss / len(decoded_msgs) if decoded_msgs else total_loss

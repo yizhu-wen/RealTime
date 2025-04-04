@@ -70,7 +70,9 @@ def set_random_seed(seed: int):
 
 def generate_random_msg(batch_size, msg_length, device):
     # random [0, 1], mapped to [-1, 1]
-    return torch.randint(0, 2, (batch_size, 1, msg_length), device=device).float()
+    return (
+        torch.randint(0, 2, (batch_size, 1, msg_length), device=device).float() * 2
+    ) - 1
 
 # Set random seed for reproducibility
 SEED = 2022
@@ -310,8 +312,8 @@ def main(configs):
                 train_avg_d_loss_on_cover += d_loss_on_cover.item()
                 train_avg_d_loss_on_encoded += d_loss_on_encoded.item()
 
-            decoder_acc = [((decoded[0] >= 0).eq(msg > 0.5).sum().float() / msg.numel()).item(),
-                           ((decoded[1] >= 0).eq(msg > 0.5).sum().float() / msg.numel()).item()]
+            decoder_acc = [((decoded[0] >= 0).eq(msg >= 0).sum().float() / msg.numel()).item(),
+                           ((decoded[1] >= 0).eq(msg >= 0).sum().float() / msg.numel()).item()]
             zero_tensor = torch.zeros(wav_matrix.shape).to(device)
             snr = 10 * torch.log10(mse_loss(wav_matrix.detach(), zero_tensor) / mse_loss(wav_matrix.detach(), y_wm.detach()))
             norm2 = mse_loss(wav_matrix.detach(), zero_tensor)
@@ -410,8 +412,8 @@ def main(configs):
                     d_on_encoded = discriminator(y_wm.detach())
                     d_loss_on_encoded = F.binary_cross_entropy_with_logits(d_on_encoded, d_target_label_encoded)
                 
-                decoder_acc = [((decoded[0] >= 0).eq(msg > 0.5).sum().float() / msg.numel()).item(),
-                               ((decoded[1] >= 0).eq(msg > 0.5).sum().float() / msg.numel()).item()]
+                decoder_acc = [((decoded[0] >= 0).eq(msg >= 0).sum().float() / msg.numel()).item(),
+                               ((decoded[1] >= 0).eq(msg >= 0).sum().float() / msg.numel()).item()]
                 zero_tensor = torch.zeros(wav_matrix.shape).to(device)
                 snr = 10 * torch.log10(mse_loss(wav_matrix.detach(), zero_tensor) / mse_loss(wav_matrix.detach(), y_wm.detach()))
                 val_avg_acc[0] += decoder_acc[0]
@@ -490,8 +492,8 @@ def main(configs):
                 d_on_encoded = discriminator(y_wm.detach())
                 d_loss_on_encoded = F.binary_cross_entropy_with_logits(d_on_encoded, d_target_label_encoded)
 
-            decoder_acc = [((decoded[0] >= 0).eq(msg > 0.5).sum().float() / msg.numel()).item(),
-                           ((decoded[1] >= 0).eq(msg > 0.5).sum().float() / msg.numel()).item()]
+            decoder_acc = [((decoded[0] >= 0).eq(msg >= 0).sum().float() / msg.numel()).item(),
+                           ((decoded[1] >= 0).eq(msg >= 0).sum().float() / msg.numel()).item()]
             zero_tensor = torch.zeros(wav_matrix.shape).to(device)
             snr = 10 * torch.log10(
                 mse_loss(wav_matrix.detach(), zero_tensor) / mse_loss(wav_matrix.detach(), y_wm.detach()))
