@@ -313,7 +313,6 @@ class distortion(nn.Module):
 
 def encodec_transformation(encodec, y, n_bandwidths, sample_rate):
     encodec_output_list = []
-
     # Ensure y is (B, C=1, T)
     if y.dim() == 2:  # (B, T)
         y = y.unsqueeze(1)  # -> (B, 1, T)
