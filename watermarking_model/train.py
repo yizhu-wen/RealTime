@@ -81,7 +81,7 @@ set_random_seed(SEED)
 logging_mark = "#"*20
 # warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO, format='%(message)s')
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
 
 def main(configs):
     logging.info('main function')
