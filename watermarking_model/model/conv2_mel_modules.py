@@ -315,7 +315,6 @@ class Decoder(nn.Module):
         self.stft = fixed_STFT(process_config["mel"]["n_fft"], process_config["mel"]["hop_length"], process_config["mel"]["win_length"])
         self.msg_linear_out = FCBlock(self.win_dim//2, self.nbits)
         self.hidden = int((process_config["mel"]["n_fft"] / 2) + 1)//2  # (322 / 2 + 1)/2 = 81
-
         self.encodec = EncodecModel.encodec_model_24khz()
         self.n_bandwidth = train_config["audio_effects"]["encodec"]["n_bandwidths"]
 
