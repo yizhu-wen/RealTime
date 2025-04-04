@@ -3,8 +3,8 @@ dataset: "librispeech"
 adv: True
 
 path:
-#  raw_path: "/storage/seit-guohanqi/librispeech_dataset/LibriSpeech_wav"
-  raw_path: "/home/yizhu/Data/LibriSpeech_wav"
+  raw_path: "/storage/seit-guohanqi/librispeech_dataset/LibriSpeech_wav"
+#  raw_path: "/home/yizhu/Data/LibriSpeech_wav"
   raw_path_test: "experiments/cloned_speechs"
   wm_speech: "./results/wm_speech"
   ckpt: "results/ckpt/"
@@ -24,7 +24,7 @@ optimize:
   lambda_no_m: 0.01
   lambda_a: 0.01
   lambda_b: 1.
-  batch_size: 2  # remote batch_size=4, local batch_size=2
+  batch_size: 4  # remote batch_size=4, local batch_size=2
   step_size: 5000 # large value means do not decay
   gamma: 0.98
   betas: [0.9, 0.98]
@@ -40,7 +40,7 @@ optimize:
   train_size: 31000
 
 iter:
-  epoch: 10
+  epoch: 25
   # epoch: 100
   save_circle: 5
   show_circle: 300
@@ -117,7 +117,7 @@ aug_weights:
 n_max_aug: null
 
 wandb:
-  enabled: false  # Set to true to enable wandb logging
+  enabled: true  # Set to true to enable wandb logging
   project: "real-time-voice-watermark"
   name: "FullSet"
   key: "9a11e5364efe3bb8fedb3741188ee0d714e942e2"
