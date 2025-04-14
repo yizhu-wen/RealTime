@@ -21,11 +21,11 @@ from torch.utils.data import DataLoader
 import wandb
 from dataset.data import WavDataset as MyDataset
 from dataset.data import collate_fn
+from distortions.dl import AudioEffects, get_my_encodec_audio_effect
 from model.conv2_mel_modules import Encoder, Decoder, Discriminator
 from model.loss import Loss_identity
 from utils.optimizer import my_step
 from utils.tools import save_op
-from watermarking_model.distortions.dl import AudioEffects, get_my_encodec_audio_effect
 
 
 def save_spectrogram_to_buffer(signal, sample_rate=16000):
