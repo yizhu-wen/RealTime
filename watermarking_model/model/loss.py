@@ -6,6 +6,7 @@ from torch import nn
 from torch.nn import functional as F
 from torchaudio.functional.filtering import highpass_biquad, treble_biquad
 
+
 # class Loss(nn.Module):
 #     def __init__(self, train_config):
 #         super(Loss, self).__init__()
@@ -16,6 +17,7 @@ from torchaudio.functional.filtering import highpass_biquad, treble_biquad
 #         embedding_loss = self.embedding_loss(x, w_x)
 #         msg_loss = self.msg_loss(msg, rec_msg)
 #         return embedding_loss, msg_loss
+
 
 def basic_loudness(waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
     """This is a simpler loudness function that is more stable.
@@ -43,7 +45,9 @@ def basic_loudness(waveform: torch.Tensor, sample_rate: int) -> torch.Tensor:
     energy = torch.mean(energy, dim=-1)
 
     # Compute channel-weighted summation
-    g = torch.tensor([1.0, 1.0, 1.0, 1.41, 1.41], dtype=waveform.dtype, device=waveform.device)
+    g = torch.tensor(
+        [1.0, 1.0, 1.0, 1.41, 1.41], dtype=waveform.dtype, device=waveform.device
+    )
     g = g[: energy.size(-2)]
 
     energy_weighted = torch.sum(g.unsqueeze(-1) * energy, dim=-2)
@@ -81,6 +85,7 @@ class TFLoudnessRatio(nn.Module):
         n_bands (int): number of bands to separate
         temperature (float): temperature of the softmax step
     """
+
     def __init__(
         self,
         sample_rate: int = 16000,
@@ -114,8 +119,12 @@ class TFLoudnessRatio(nn.Module):
         bands_out = self.filter(out_sig).view(B * self.n_bands, 1, -1)
         frame = int(self.segment * self.sample_rate)
         stride = int(frame * (1 - self.overlap))
-        gt = _unfold(bands_ref, frame, stride).squeeze(1).contiguous().view(-1, 1, frame)
-        est = _unfold(bands_out, frame, stride).squeeze(1).contiguous().view(-1, 1, frame)
+        gt = (
+            _unfold(bands_ref, frame, stride).squeeze(1).contiguous().view(-1, 1, frame)
+        )
+        est = (
+            _unfold(bands_out, frame, stride).squeeze(1).contiguous().view(-1, 1, frame)
+        )
         l_noise = basic_loudness(est - gt, sample_rate=self.sample_rate)  # watermark
         l_ref = basic_loudness(gt, sample_rate=self.sample_rate)  # ground truth
         l_ratio = (l_noise - l_ref).view(-1, B)
@@ -127,30 +136,30 @@ class Loss_identity(nn.Module):
     def __init__(self):
         super(Loss_identity, self).__init__()
         self.msg_loss = nn.MSELoss()
-        # self.msg_loss = nn.BCEWithLogitsLoss()
-        # self.msg_loss= nn.BCELoss()
         self.embedding_loss = nn.MSELoss()
         self.tfloudness_loss = TFLoudnessRatio(n_bands=16)
-    
-    def en_de_loss(self, x, w_x, msg, rec_msg):
-        embedding_loss = self.embedding_loss(x, w_x)
-        msg_loss = self.msg_loss(msg, rec_msg[0]) + self.msg_loss(msg, rec_msg[1])
+
+    def en_de_loss(self, x, w_x):
+        embedding_loss = self.embedding_loss(w_x, x)
         loudness_loss = self.tfloudness_loss(w_x.unsqueeze(1), x.unsqueeze(1))
+        return embedding_loss, loudness_loss
 
-        return embedding_loss, msg_loss, loudness_loss
+    def msg_loss_func(self, rec_msg, msg):
+        msg_loss = self.msg_loss(rec_msg, msg)
+        return msg_loss
 
 
-def encodec_loss_fn(decoded_msgs, msg):
-    # encodec_msg_loss = nn.BCEWithLogitsLoss()
-    encodec_msg_loss = nn.MSELoss()
-    # Initialize total_loss as a tensor on the correct device.
-    total_loss = torch.tensor(0.0, device=msg.device)
-    for decoded_msg in decoded_msgs:
-        loss = encodec_msg_loss(msg, decoded_msg)
-        total_loss += loss
-    # Average the loss by dividing by the number of decoded messages.
-    total_loss = total_loss / len(decoded_msgs) if decoded_msgs else total_loss
-    return total_loss
+# def encodec_loss_fn(decoded_msgs, msg):
+#     # encodec_msg_loss = nn.BCEWithLogitsLoss()
+#     encodec_msg_loss = nn.MSELoss()
+#     # Initialize total_loss as a tensor on the correct device.
+#     total_loss = torch.tensor(0.0, device=msg.device)
+#     for decoded_msg in decoded_msgs:
+#         loss = encodec_msg_loss(decoded_msg, msg)
+#         total_loss += loss
+#     # Average the loss by dividing by the number of decoded messages.
+#     total_loss = total_loss / len(decoded_msgs) if decoded_msgs else total_loss
+#     return total_loss
 
 
 # class Loss_identity_3(nn.Module):

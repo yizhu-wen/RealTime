@@ -90,7 +90,6 @@ audio_effects:
     bitrate: 128k # should be a string e.g. "8k", "32k".. cf ffmpeg to see available bitrates
     lowpass_freq: null # don't apply low pass freq to ffmpeg aac compression
   encodec:
-    ckpt: "//pretrained/facebook/encodec_24khz"
     n_bandwidths: [3, 6, 12, 24]  # corresponds to n_qs [4, 8, 16, 32]
 #    n_bandwidths: [3]  # corresponds to n_qs [4, 8, 16, 32]
 
@@ -99,20 +98,24 @@ select_aug_mode:
   # `use_eval_acc` changes the weights based on the accuracies at evaluation time
 
 aug_weights:
-  speed: 0.1
-  updownresample: 0.1
-  echo: 0.1
-  pink_noise: 0.1
-  lowpass_filter: 0.1
-  highpass_filter: 0.1
-  bandpass_filter: 0.1
-  smooth: 0.1
-  boost_audio: 0.1
-  duck_audio: 0.1
-  mp3_compression: 0.1 # eval only never use in training even if eval_acc low
-  aac_compression: 0.1 # eval only never use in training even if eval_acc low
-  encodec: 0.1
-  identity: 1 # no augmentation
+#  speed: 0.1
+#  updownresample: 0.1
+#  echo: 0.1
+#  pink_noise: 0.1
+#  lowpass_filter: 0.1
+#  highpass_filter: 0.1
+#  bandpass_filter: 0.1
+#  smooth: 0.1
+#  boost_audio: 0.1
+#  duck_audio: 0.1
+#  mp3_compression: 0.1 # eval only never use in training even if eval_acc low
+#  aac_compression: 0.1 # eval only never use in training even if eval_acc low
+#  encodec_bw=3: 0.1
+#  encodec_bw=6: 0.1
+#  encodec_bw=12: 0.1
+#  encodec_bw=24: 0.1
+#  mel_griffin_lim: 1.0  # - loss
+  identity: 1.0 # no augmentation
 
 n_max_aug: null
 
