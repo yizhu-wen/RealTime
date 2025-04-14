@@ -34,7 +34,7 @@ class tacotron_mel:
         self.mel_basis = self._build_mel_basis()
         self.inv_mel_basis = np.linalg.pinv(self._build_mel_basis())
         self.mel_fmax = 8000
-        self.sample_rate = 22050
+        self.sample_rate = 16000
         self.num_mels = 80
         self.mel_fmin = 0.0
         self.signal_norm = True
@@ -495,7 +495,7 @@ class TacotronSTFT(torch.nn.Module):
         hop_length=256,
         win_length=1024,
         n_mel_channels=80,
-        sampling_rate=22050,
+        sampling_rate=16000,
         mel_fmin=0.0,
         mel_fmax=8000.0,
     ):
@@ -534,7 +534,6 @@ class TacotronSTFT(torch.nn.Module):
         mel_output: torch.FloatTensor of shape (B, n_mel_channels, T)
         """
         # add by chave luv
-        print()
         y = self.wav_norm(y)
 
         try:
@@ -564,15 +563,26 @@ class TacotronSTFT(torch.nn.Module):
         magnitudes = torch.matmul(
             self.mel_to_linear_basis, self.spectral_de_normalize(magnitudes)
         )
+        assert torch.all(
+            torch.isfinite(magnitudes)
+        ), "NaN or Inf in magnitudes after matmul"
 
         angles = np.angle(np.exp(2j * np.pi * np.random.rand(*magnitudes.size())))
         angles = angles.astype(np.float32)
         angles = torch.autograd.Variable(torch.from_numpy(angles)).to(device)
+        assert torch.all(
+            torch.isfinite(angles)
+        ), "NaN or Inf in angles after conversion"
         signal = self.stft_fn.inverse(magnitudes, angles).squeeze(1)
+        assert torch.all(
+            torch.isfinite(signal)
+        ), "NaN or Inf in signal after first inverse call"
 
         for i in range(n_iters):
             _, angles = self.stft_fn.transform(signal)
+            assert torch.all(torch.isfinite(angles)), f"NaN in angles at iteration {i}"
             signal = self.stft_fn.inverse(magnitudes, angles).squeeze(1)
+            assert torch.all(torch.isfinite(signal)), f"NaN in signal at iteration {i}"
         signal = self.wav_norm(signal)
         # return signal, magnitudes
         return signal
@@ -588,6 +598,12 @@ class TacotronSTFT(torch.nn.Module):
     #     print("max_value:", max_value)
     #     y = y / max_value
     #     return y
+
+
+# class TacotronSTFT(torch.nn.Module):
+#     def __init__(self, filter_length=1024, hop_length=256, win_length=1024, n_mel_channels=80, sampling_rate):
+#         super(TacotronSTFT, self).__init__()
+#         self.n
 
 
 class fixed_STFT(torch.nn.Module):

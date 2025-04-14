@@ -670,11 +670,7 @@ class AudioEffects:
             filter_length=1024, hop_length=256, win_length=1024
         )
         y_mel = mel_transform.mel_spectrogram(y.squeeze(1))
-        if torch.isnan(y_mel).any():
-            print("mel_griffin_lim y_mel output contains NaN values!")
         y_d = (mel_transform.griffin_lim(magnitudes=y_mel)).unsqueeze(1)
-        if torch.isnan(y_d).any():
-            print("mel_griffin_lim output contains NaN values!")
         return audio_effect_return(tensor=y_d, mask=mask)
 
 

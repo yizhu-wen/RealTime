@@ -316,7 +316,7 @@ def main(configs):
                     continue
 
                 if random.random() < prob:
-                    # print(f"Applying augmentation: {aug_name}")
+                    print(f"Applying augmentation: {aug_name}")
                     # Get the augmentation function from the dictionary.
                     aug_func = augmentations[aug_name]
                     # Apply the augmentation; you can pass additional parameters if needed.
@@ -341,9 +341,9 @@ def main(configs):
             losses = loss.en_de_loss(wav_matrix, y_wm)
 
             if global_step < pre_step:
-                sum_loss = lambda_m * losses[1]
+                sum_loss = lambda_m * other_loss
             else:
-                sum_loss = lambda_e * losses[0] + lambda_e * losses[1] + 0 * other_loss
+                sum_loss = lambda_e * losses[0] + lambda_e * losses[1] + lambda_m * other_loss
 
             # adv
             if train_config["adv"]:
