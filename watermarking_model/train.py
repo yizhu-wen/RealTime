@@ -382,7 +382,7 @@ def main(configs):
                         losses[2],
                         loss_identity,
                         decoder_acc,
-                        decoder_acc_identity,
+                        decoder_acc_identity.item(),
                         snr,
                         norm2,
                         sample["patch_num"].tolist(),
