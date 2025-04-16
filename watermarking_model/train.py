@@ -372,26 +372,26 @@ def main(configs):
                 train_avg_d_loss_on_cover += d_loss_on_cover.item()
                 train_avg_d_loss_on_encoded += d_loss_on_encoded.item()
 
-            if step % show_circle == 0:
-                logging.info("-" * 100)
-                logging.info(
-                    "step:{} - wav_loss:{:.8f} - tfloudness_loss:{:.8f} - msg_loss:{:.8f} - msg_loss_identity:{:.8f} - acc:{:.8f} - acc_identity:{:.8f} - snr:{:.8f} - norm:{:.8f} - patch_num:{} - pad_num:{} - wav_len:{} ".format(
-                        step,
-                        losses[0],
-                        losses[1],
-                        losses[2],
-                        loss_identity,
-                        decoder_acc,
-                        decoder_acc_identity.item(),
-                        snr,
-                        norm2,
-                        sample["patch_num"].tolist(),
-                        sample["pad_num"].tolist(),
-                        wav_matrix.shape[-1],
-                        d_loss_on_encoded.item(),
-                        d_loss_on_cover.item(),
-                    )
-                )
+            # if step % show_circle == 0:
+            #     logging.info("-" * 100)
+            #     logging.info(
+            #         "step:{} - wav_loss:{:.8f} - tfloudness_loss:{:.8f} - msg_loss:{:.8f} - msg_loss_identity:{:.8f} - acc:{:.8f} - acc_identity:{:.8f} - snr:{:.8f} - norm:{:.8f} - patch_num:{} - pad_num:{} - wav_len:{} ".format(
+            #             step,
+            #             losses[0],
+            #             losses[1],
+            #             losses[2],
+            #             loss_identity,
+            #             decoder_acc,
+            #             decoder_acc_identity,
+            #             snr,
+            #             norm2,
+            #             sample["patch_num"].tolist(),
+            #             sample["pad_num"].tolist(),
+            #             wav_matrix.shape[-1],
+            #             d_loss_on_encoded.item(),
+            #             d_loss_on_cover.item(),
+            #         )
+            #     )
             # --- Memory Cleanup ---
             # Delete all intermediate variables that are no longer needed
             del (wav_matrix, msg, watermark, carrier_watermarked, y_wm, decoded, losses)
