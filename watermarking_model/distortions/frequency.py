@@ -456,7 +456,7 @@ class STFT(torch.nn.Module):
             # remove modulation effects
             approx_nonzero_indices = torch.from_numpy(
                 np.where(window_sum > tiny(window_sum))[0]
-            )
+            ).to(magnitude.device)
             window_sum = torch.autograd.Variable(
                 torch.from_numpy(window_sum), requires_grad=False
             )
@@ -680,11 +680,11 @@ class fixed_STFT(torch.nn.Module):
             # remove modulation effects
             approx_nonzero_indices = torch.from_numpy(
                 np.where(window_sum > tiny(window_sum))[0]
-            )
+            ).to(magnitude.device)
             window_sum = torch.autograd.Variable(
                 torch.from_numpy(window_sum), requires_grad=False
             )
-            window_sum = window_sum.cuda() if magnitude.is_cuda else window_sum
+            window_sum = window_sum.to(magnitude.device) if magnitude.is_cuda else window_sum
             inverse_transform[:, :, approx_nonzero_indices] /= window_sum[
                 approx_nonzero_indices
             ]
