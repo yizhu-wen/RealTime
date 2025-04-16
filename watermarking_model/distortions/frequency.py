@@ -34,7 +34,7 @@ class tacotron_mel:
         self.mel_basis = self._build_mel_basis()
         self.inv_mel_basis = np.linalg.pinv(self._build_mel_basis())
         self.mel_fmax = 8000
-        self.sample_rate = 22050
+        self.sample_rate = 16000
         self.num_mels = 80
         self.mel_fmin = 0.0
         self.signal_norm = True
@@ -494,7 +494,7 @@ class TacotronSTFT(torch.nn.Module):
         hop_length=256,
         win_length=1024,
         n_mel_channels=80,
-        sampling_rate=22050,
+        sampling_rate=16000,
         mel_fmin=0.0,
         mel_fmax=8000.0,
     ):
