@@ -280,7 +280,7 @@ from torch.autograd import Variable
 import librosa.util as librosa_util
 from librosa.filters import mel as librosa_mel_fn
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
 
 
 def dynamic_range_compression(x, C=1, clip_val=1e-5):
