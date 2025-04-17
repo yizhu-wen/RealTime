@@ -129,8 +129,8 @@ class Loss_identity(nn.Module):
 
     def en_de_loss(self, x, w_x, msg, rec_msg):
         embedding_loss = self.embedding_loss(x, w_x)
-        msg_loss = self.msg_loss(rec_msg, msg)
         loudness_loss = self.tfloudness_loss(w_x.unsqueeze(1), x.unsqueeze(1))
+        msg_loss = self.msg_loss(rec_msg, msg)
 
         return embedding_loss, loudness_loss, msg_loss
 

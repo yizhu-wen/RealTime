@@ -215,7 +215,7 @@ class Encoder(nn.Module):
         actual_watermark = (
             torch.cat([zeros_left, watermark_stft, zeros_right], dim=3) + EPS
         )
-        return actual_watermark
+        return actual_watermark, zeros_right
 
     def forward(self, x, msg, global_step):
         num_samples = x.shape[-1]
@@ -280,7 +280,7 @@ class Encoder(nn.Module):
 
         if len(list_of_watermarks) > 0:
             watermark = torch.cat(list_of_watermarks, dim=-1)
-            all_watermark_stft = self.pad_w_zero_stft(
+            all_watermark_stft, zeros_right = self.pad_w_zero_stft(
                 stft_result, watermark, voice_prefilling
             )
             del list_of_watermarks
@@ -296,7 +296,7 @@ class Encoder(nn.Module):
             phase = torch.atan2(imag_part, real_part)
 
             y = self.stft.inverse(spect, phase).squeeze(1)
-            del spect, phase, real_part, imag_part
+            del spect, phase, real_part, imag_part, all_watermark_stft
 
             # with torch.no_grad():
             #     # Get chunk-level speech probabilities for the batch.
@@ -317,7 +317,7 @@ class Encoder(nn.Module):
             #
             # # Apply the mask to the original audio to zero out non-speech regions.
             # masked_y = y * sample_masks
-            return y, all_watermark_stft
+            return y, zeros_right.shape[-1]
         else:
             print("Not enough watermarking!!!!")
             return None
