@@ -86,7 +86,7 @@ set_random_seed(SEED)
 logging_mark = "#" * 20
 # warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
-device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
 def main(configs):
@@ -285,14 +285,12 @@ def main(configs):
             watermark, zeros_right = encoder(wav_matrix, msg, global_step)
             waveform_length = (zeros_right - 1) * 160 + 320
             y_wm = wav_matrix + watermark
-            # y_wm_mel = mel_transform.mel_spectrogram(y_wm)
-            # y_wm_d = mel_transform.griffin_lim(magnitudes=y_wm_mel)
-            y_wm_d = y_wm
+            y_wm_mel = mel_transform.mel_spectrogram(y_wm)
+            y_wm_d = mel_transform.griffin_lim_gpu(magnitudes=y_wm_mel)
             decoded = decoder(y_wm_d, global_step)
             losses = loss.en_de_loss(wav_matrix, y_wm, msg, decoded)
-            # decoded_identity = decoder(y_wm, global_step)
-            # loss_identity = loss.identity_msg_loss(msg, decoded_identity)
-            loss_identity = torch.Tensor([0]).to(device)
+            decoded_identity = decoder(y_wm, global_step)
+            loss_identity = loss.identity_msg_loss(msg, decoded_identity)
             # lamda_e = 1.
             # lamda_m = 10
             if global_step < pre_step:
@@ -319,7 +317,8 @@ def main(configs):
                 )
                 sum_loss += lambda_a * g_loss_adv
 
-            sum_loss.backward()
+            with torch.autograd.detect_anomaly():
+                sum_loss.backward()
 
             torch.nn.utils.clip_grad_norm_(
                 chain(encoder.parameters(), decoder.parameters()), max_norm=1.0
@@ -355,10 +354,9 @@ def main(configs):
                 (decoded >= 0).eq(msg >= 0).sum().float() / msg.numel()
             ).item()
 
-            # decoder_acc_identity = (
-            #     (decoded_identity >= 0).eq(msg >= 0).sum().float() / msg.numel()
-            # ).item()
-            decoder_acc_identity = 0
+            decoder_acc_identity = (
+                (decoded_identity >= 0).eq(msg >= 0).sum().float() / msg.numel()
+            ).item()
 
             zero_tensor = torch.zeros(wav_matrix.shape).to(device)
             snr = 10 * torch.log10(
@@ -461,15 +459,12 @@ def main(configs):
                 watermark, zeros_right = encoder(wav_matrix, msg, global_step)
                 waveform_length = (zeros_right - 1) * 160 + 320
                 y_wm = wav_matrix + watermark
-                # y_wm_mel = mel_transform.mel_spectrogram(y_wm)
-                # y_wm_d = mel_transform.griffin_lim(magnitudes=y_wm_mel)
-
-                y_wm_d = y_wm
+                y_wm_mel = mel_transform.mel_spectrogram(y_wm)
+                y_wm_d = mel_transform.griffin_lim_gpu(magnitudes=y_wm_mel)
                 decoded = decoder(y_wm_d, global_step)
                 losses = loss.en_de_loss(wav_matrix, y_wm, msg, decoded)
-                # decoded_identity = decoder(y_wm, global_step)
-                # loss_identity = loss.identity_msg_loss(msg, decoded_identity)
-                loss_identity = 0
+                decoded_identity = decoder(y_wm, global_step)
+                loss_identity = loss.identity_msg_loss(msg, decoded_identity)
                 # adv
                 if train_config["adv"]:
                     lambda_a = lambda_m = train_config["optimize"]["lambda_a"]
@@ -505,10 +500,9 @@ def main(configs):
                     (decoded >= 0).eq(msg >= 0).sum().float() / msg.numel()
                 ).item()
 
-                decoder_acc_identity = 0
-                # decoder_acc_identity = (
-                #     (decoded_identity >= 0).eq(msg >= 0).sum().float() / msg.numel()
-                # ).item()
+                decoder_acc_identity = (
+                    (decoded_identity >= 0).eq(msg >= 0).sum().float() / msg.numel()
+                ).item()
 
                 zero_tensor = torch.zeros(wav_matrix.shape).to(device)
                 snr = 10 * torch.log10(
@@ -587,15 +581,12 @@ def main(configs):
             watermark, zeros_right = encoder(wav_matrix, msg, global_step)
             waveform_length = (zeros_right - 1) * 160 + 320
             y_wm = wav_matrix + watermark
-            # y_wm_mel = mel_transform.mel_spectrogram(y_wm)
-            # y_wm_d = mel_transform.griffin_lim(magnitudes=y_wm_mel)
-
-            y_wm_d = y_wm
+            y_wm_mel = mel_transform.mel_spectrogram(y_wm)
+            y_wm_d = mel_transform.griffin_lim_gpu(magnitudes=y_wm_mel)
             decoded = decoder(y_wm_d, global_step)
             losses = loss.en_de_loss(wav_matrix, y_wm, msg, decoded)
-            # decoded_identity = decoder(y_wm, global_step)
-            # loss_identity = loss.identity_msg_loss(msg, decoded_identity)
-            loss_identity = torch.Tensor([0]).to(device)
+            decoded_identity = decoder(y_wm, global_step)
+            loss_identity = loss.identity_msg_loss(msg, decoded_identity)
             # adv
             if train_config["adv"]:
                 lambda_a = lambda_m = train_config["optimize"]["lambda_a"]
@@ -627,10 +618,9 @@ def main(configs):
                 (decoded >= 0).eq(msg >= 0).sum().float() / msg.numel()
             ).item()
 
-            decoder_acc_identity = 0
-            # decoder_acc_identity = (
-            #     (decoded_identity >= 0).eq(msg >= 0).sum().float() / msg.numel()
-            # ).item()
+            decoder_acc_identity = (
+                (decoded_identity >= 0).eq(msg >= 0).sum().float() / msg.numel()
+            ).item()
 
             zero_tensor = torch.zeros(wav_matrix.shape).to(device)
             snr = 10 * torch.log10(

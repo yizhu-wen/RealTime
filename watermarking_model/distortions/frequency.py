@@ -21,9 +21,9 @@ class tacotron_mel:
     def __init__(self):
         self.preemphasis = 0.0
         self.do_amp_to_db_mel = True
-        self.fft_size = 1024
-        self.hop_length = 256
-        self.win_length = 1024
+        self.fft_size = 322
+        self.hop_length = 160
+        self.win_length = 322
         self.stft_pad_mode = "reflect"
         self.spec_gain = 20
         log_func = "np.log"
@@ -275,12 +275,11 @@ class tacotron_mel:
 import torch
 from scipy.signal import get_window
 from librosa.util import pad_center, tiny
+import torchaudio.functional as F_torch
 import torch.nn.functional as F
 from torch.autograd import Variable
 import librosa.util as librosa_util
 from librosa.filters import mel as librosa_mel_fn
-
-device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
 
 
 def dynamic_range_compression(x, C=1, clip_val=1e-5):
@@ -364,14 +363,14 @@ class STFT(torch.nn.Module):
     """adapted from Prem Seetharaman's https://github.com/pseeth/pytorch-stft"""
 
     def __init__(
-        self, filter_length=800, hop_length=200, win_length=800, window="hann"
+        self, filter_length=322, hop_length=160, win_length=322, window="hann"
     ):
         super(STFT, self).__init__()
         self.filter_length = filter_length
         self.hop_length = hop_length
         self.win_length = win_length
         self.window = window
-        self.forward_transform = None
+
         scale = self.filter_length / self.hop_length
         fourier_basis = np.fft.fft(np.eye(self.filter_length))
 
@@ -490,9 +489,9 @@ def _mel_to_linear_matrix(sr, n_fft, n_mels, mel_fmin, mel_fmax):
 class TacotronSTFT(torch.nn.Module):
     def __init__(
         self,
-        filter_length=1024,
-        hop_length=256,
-        win_length=1024,
+        filter_length=322,
+        hop_length=160,
+        win_length=322,
         n_mel_channels=80,
         sampling_rate=16000,
         mel_fmin=0.0,
@@ -513,6 +512,11 @@ class TacotronSTFT(torch.nn.Module):
         self.register_buffer(
             "mel_to_linear_basis", mel_to_linear_basis
         )  # register_buffer requires_grad is False
+
+        # Create & center-pad the window
+        win_np = get_window("hann", win_length, fftbins=True)
+        win_padded = pad_center(win_np, filter_length)  # size = filter_length
+        self.window_tensor = torch.from_numpy(win_padded).float()
 
     def spectral_normalize(self, magnitudes):
         output = dynamic_range_compression(magnitudes)
@@ -565,13 +569,42 @@ class TacotronSTFT(torch.nn.Module):
 
         angles = np.angle(np.exp(2j * np.pi * np.random.rand(*magnitudes.size())))
         angles = angles.astype(np.float32)
-        angles = torch.autograd.Variable(torch.from_numpy(angles)).to(device)
+        angles = torch.autograd.Variable(torch.from_numpy(angles)).to(magnitudes.device)
         signal = self.stft_fn.inverse(magnitudes, angles).squeeze(1)
 
         for i in range(n_iters):
             _, angles = self.stft_fn.transform(signal)
             signal = self.stft_fn.inverse(magnitudes, angles).squeeze(1)
         signal = self.wav_norm(signal)
+        # return signal, magnitudes
+        return signal
+
+    def griffin_lim_gpu(self, magnitudes, n_iters=60):
+        """
+        Fast, batched Griffin-Lim via torchaudio.functional.griffinlim.
+        """
+        if n_iters is None:
+            n_iters = self.stft_fn.window_length  # or default to 60
+
+        # 1) undo our spectral normalization & mel-to-linear projection
+        linear_mag = torch.matmul(
+            self.mel_to_linear_basis, self.spectral_de_normalize(magnitudes)
+        )
+
+        out = F_torch.griffinlim(
+            linear_mag,
+            n_fft=self.stft_fn.filter_length,
+            win_length=self.stft_fn.win_length,
+            hop_length=self.stft_fn.hop_length,
+            window=self.window_tensor.to(magnitudes.device),
+            power=1.0,
+            n_iter=n_iters,
+            momentum=0.99,
+            length=self.stft_fn.num_samples,
+            rand_init=True,
+        )
+
+        signal = self.wav_norm(out)
         # return signal, magnitudes
         return signal
 
@@ -592,7 +625,7 @@ class fixed_STFT(torch.nn.Module):
         self.hop_length = hop_length
         self.win_length = win_length
         self.window = window
-        self.forward_transform = None
+
         scale = self.filter_length / self.hop_length
         fourier_basis = np.fft.fft(np.eye(self.filter_length))
 
