@@ -149,7 +149,6 @@ class Decoder(nn.Module):
             self.dl = distortion()
 
         self.mel_transform = TacotronSTFT(filter_length=process_config["mel"]["n_fft"], hop_length=process_config["mel"]["hop_length"], win_length=process_config["mel"]["win_length"])
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.vocoder_step = model_config["structure"]["vocoder_step"]
 
         win_dim = int((process_config["mel"]["n_fft"] / 2) + 1)

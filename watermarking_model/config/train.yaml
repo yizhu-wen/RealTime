@@ -16,13 +16,12 @@ watermark:
   future_amt_second: 0.5
 
 optimize:
-  lr: 0.00002
+  lr: 0.0001  # 0.00002
   lambda_e: 1.
   lambda_m: 10.
   # lambda_m: 0.01
   lambda_no_m: 0.01
   lambda_a: 0.01
-  lambda_b: 1.
   batch_size: 4  # remote batch_size=4, local batch_size=2
   step_size: 5000 # large value means do not decay
   gamma: 0.98
@@ -42,8 +41,8 @@ iter:
   epoch: 30
   # epoch: 100
   save_circle: 20
-  show_circle: 1000
-  val_circle: 1000
+  show_circle: 500
+  val_circle: 500
   data_divider: 1
   test_record_num: 100
   num_save_img: 10

@@ -1,32 +1,31 @@
-import os
-import torch
-import yaml
-import logging
 import argparse
-import wandb
-from io import BytesIO
-import matplotlib.cm as cm
-import numpy as np
-import matplotlib.pyplot as plt
-from torch.optim import Adam
-from rich.progress import track
-from torch.utils.data import DataLoader
-from model.loss import Loss_identity
-from utils.tools import save, log, save_op
-from utils.optimizer import ScheduledOptimMain, ScheduledOptimDisc, my_step
-from itertools import chain
-import librosa.display
-from torch.nn.functional import mse_loss
-from dataset.data import collate_fn
-import torch.nn.functional as F
-from torch.optim.lr_scheduler import StepLR
-from model.conv2_mel_modules import Encoder, Decoder, Discriminator, save_waveform, save_spectrum, save_spectrum_normal
-from dataset.data import WavDataset as MyDataset
-import tempfile
+import logging
+import os
 import random
-import shutil
+from io import BytesIO
+from itertools import chain
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import torch.nn.functional as F
+import yaml
 from PIL import Image
-import torch.backends.cudnn as cudnn
+from rich.progress import track
+from torch.nn.functional import mse_loss
+from torch.optim import Adam
+from torch.optim.lr_scheduler import StepLR
+from torch.utils.data import DataLoader
+
+import wandb
+from dataset.data import WavDataset as MyDataset
+from dataset.data import collate_fn
+from distortions.frequency import TacotronSTFT
+from model.conv2_mel_modules import Encoder, Decoder, Discriminator
+from model.loss import Loss_identity
+from utils.optimizer import my_step
+from utils.tools import save_op
+
 
 def save_spectrogram_to_buffer(signal, sample_rate=16000):
     buf = BytesIO()
@@ -37,15 +36,16 @@ def save_spectrogram_to_buffer(signal, sample_rate=16000):
         NFFT=320,
         noverlap=160,
         window=np.hanning(320),
-        cmap='magma',
+        cmap="magma",
         vmin=-100,
     )
-    plt.colorbar(format='%+2.0f dB')
+    plt.colorbar(format="%+2.0f dB")
     plt.tight_layout()
-    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.0)
+    plt.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.0)
     plt.close()
     buf.seek(0)  # reset buffer pointer to beginning
     return buf
+
 
 def buffer_to_wandb_image(buffer, caption=""):
     # Convert the buffer to a PIL Image, then to a numpy array.
@@ -53,12 +53,14 @@ def buffer_to_wandb_image(buffer, caption=""):
     np_img = np.array(img)
     return wandb.Image(np_img, caption=caption)
 
+
 def normalize_audio(y: torch.Tensor) -> torch.Tensor:
     """Normalize an audio tensor so its maximum absolute value is 1."""
     peak = torch.max(torch.abs(y))
     if peak.item() > 1e-8:
         y = y / peak
     return y
+
 
 # Set random seed for reproducibility
 def set_random_seed(seed: int):
@@ -76,17 +78,19 @@ def generate_random_msg(batch_size, msg_length, device):
         torch.randint(0, 2, (batch_size, 1, msg_length), device=device).float() * 2
     ) - 1
 
+
 # Set random seed for reproducibility
 SEED = 2022
 set_random_seed(SEED)
 
-logging_mark = "#"*20
+logging_mark = "#" * 20
 # warnings.filterwarnings("ignore")
-logging.basicConfig(level=logging.INFO, format='%(message)s')
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
+
 def main(configs):
-    logging.info('main function')
+    logging.info("main function")
     process_config, model_config, train_config = configs
 
     pre_step = 0
@@ -155,12 +159,12 @@ def main(configs):
         )
         test_loss_summary_table = wandb.Table(
             columns=[
-                "test_loss",
                 "test_wav_loss",
                 "test_msg_loss",
+                "test_msg_loss_identity",
                 "test_loudness_loss",
-                "test_acc_1",
-                "test_acc_2",
+                "test_avg_acc",
+                "test_avg_acc_identity",
                 "test_avg_snr",
                 "test_d_loss_on_encoded",
                 "test_d_loss_on_cover",
@@ -206,21 +210,27 @@ def main(configs):
             betas=train_config["optimize"]["betas"],
             eps=train_config["optimize"]["eps"],
             weight_decay=train_config["optimize"]["weight_decay"],
-            lr = train_config["optimize"]["lr"]
+            lr=train_config["optimize"]["lr"],
         )
-        lr_sched_d = StepLR(d_op, step_size=train_config["optimize"]["step_size"], gamma=train_config["optimize"]["gamma"])
-    # shared parameters
-    if model_config["structure"]["share"]:
-        decoder.wav_encoder = encoder.wav_encoder
+        lr_sched_d = StepLR(
+            d_op,
+            step_size=train_config["optimize"]["step_size"],
+            gamma=train_config["optimize"]["gamma"],
+        )
+
     # ---------------- optimizer
     en_de_op = Adam(
-            params=chain(decoder.parameters(), encoder.parameters()),
-            betas=train_config["optimize"]["betas"],
-            eps=train_config["optimize"]["eps"],
-            weight_decay=train_config["optimize"]["weight_decay"],
-            lr = train_config["optimize"]["lr"]
-        )
-    lr_sched = StepLR(en_de_op, step_size=train_config["optimize"]["step_size"], gamma=train_config["optimize"]["gamma"])
+        params=chain(decoder.parameters(), encoder.parameters()),
+        betas=train_config["optimize"]["betas"],
+        eps=train_config["optimize"]["eps"],
+        weight_decay=train_config["optimize"]["weight_decay"],
+        lr=train_config["optimize"]["lr"],
+    )
+    lr_sched = StepLR(
+        en_de_op,
+        step_size=train_config["optimize"]["step_size"],
+        gamma=train_config["optimize"]["gamma"],
+    )
 
     # ---------------- Loss
     loss = Loss_identity()
@@ -240,22 +250,27 @@ def main(configs):
     show_circle = train_config["iter"]["show_circle"]
     lambda_e = train_config["optimize"]["lambda_e"]
     lambda_m = train_config["optimize"]["lambda_m"]
-    lambda_b = train_config["optimize"]["lambda_b"]
     num_save_img = train_config["iter"]["num_save_img"]
     sample_rate = process_config["audio"]["or_sample_rate"]
+    offset_samples = 2 * sample_rate
     global_step = 0
     train_len = len(train_audios_loader)
-    for ep in range(1, epoch_num+1):
+    for ep in range(1, epoch_num + 1):
         encoder.train()
         decoder.train()
         discriminator.train()
+        mel_transform = TacotronSTFT(
+            filter_length=1024, hop_length=256, win_length=1024
+        ).to(device)
         step = 0
-        logging.info('Epoch {}/{}'.format(ep, epoch_num))
+        logging.info("Epoch {}/{}".format(ep, epoch_num))
 
-        train_avg_acc = [0, 0]
+        train_avg_acc = 0
+        train_avg_acc_griffin = 0
         train_avg_snr = 0
         train_avg_wav_loss = 0
         train_avg_msg_loss = 0
+        train_avg_msg_loss_griffin = 0
         train_avg_loudness_loss = 0
         train_avg_d_loss_on_encoded = 0
         train_avg_d_loss_on_cover = 0
@@ -267,25 +282,40 @@ def main(configs):
             # ---------------- build watermark
             wav_matrix = sample["matrix"].to(device)
             msg = generate_random_msg(wav_matrix.size(0), msg_length, device)
-            watermark, carrier_wateramrked = encoder(wav_matrix, msg, global_step)
+            watermark, zeros_right = encoder(wav_matrix, msg, global_step)
+            waveform_length = (zeros_right - 1) * 160 + 320
             y_wm = wav_matrix + watermark
             decoded = decoder(y_wm, global_step)
             losses = loss.en_de_loss(wav_matrix, y_wm, msg, decoded)
-            #lamda_e = 1.
-            #lamda_m = 10
+            y_wm_mel = mel_transform.mel_spectrogram(y_wm)
+            y_wm_d = mel_transform.griffin_lim_gpu(magnitudes=y_wm_mel)
+            decoded_griffin = decoder(y_wm_d, global_step)
+            loss_giffin = loss.identity_msg_loss(msg, decoded_griffin)
+            # lamda_e = 1.
+            # lamda_m = 10
             if global_step < pre_step:
-                sum_loss = lambda_m*losses[1]
+                sum_loss = lambda_m * losses[2]
             else:
-                sum_loss = lambda_e*losses[0] + lambda_m*losses[1] + lambda_b*losses[2]
-            
+                sum_loss = (
+                    lambda_e * losses[0]
+                    + lambda_e * losses[1]
+                    + lambda_m * (losses[2] - loss_giffin)
+                )
+
             # adv
             if train_config["adv"]:
-                lambda_a = lambda_m = train_config["optimize"]["lambda_a"] # modify weights of m and a for better convergence
+                lambda_a = lambda_m = train_config["optimize"][
+                    "lambda_a"
+                ]  # modify weights of m and a for better convergence
                 g_target_label_encoded = torch.full((b, 1), 1, device=device).float()
-                d_on_encoded_for_enc = discriminator(y_wm)
+                d_on_encoded_for_enc = discriminator(
+                    y_wm[:, offset_samples:-waveform_length]
+                )
                 # target label for encoded images should be 'cover', because we want to fool the discriminator
-                g_loss_adv = F.binary_cross_entropy_with_logits(d_on_encoded_for_enc, g_target_label_encoded)
-                sum_loss += lambda_a*g_loss_adv
+                g_loss_adv = F.binary_cross_entropy_with_logits(
+                    d_on_encoded_for_enc, g_target_label_encoded
+                )
+                sum_loss += lambda_a * g_loss_adv
 
             sum_loss.backward()
 
@@ -294,52 +324,91 @@ def main(configs):
             )
 
             my_step(en_de_op, lr_sched, global_step, train_len)
-            
+
             if train_config["adv"]:
                 d_target_label_cover = torch.full((b, 1), 1, device=device).float()
-                d_on_cover = discriminator(wav_matrix)
-                d_loss_on_cover = F.binary_cross_entropy_with_logits(d_on_cover, d_target_label_cover)
+                d_on_cover = discriminator(
+                    wav_matrix[:, offset_samples:-waveform_length]
+                )
+                d_loss_on_cover = F.binary_cross_entropy_with_logits(
+                    d_on_cover, d_target_label_cover
+                )
                 d_loss_on_cover.backward()
 
                 d_target_label_encoded = torch.full((b, 1), 0, device=device).float()
-                d_on_encoded = discriminator(y_wm.detach())
-                # target label for encoded images should be 'encoded', because we want discriminator fight with encoder
-                d_loss_on_encoded = F.binary_cross_entropy_with_logits(d_on_encoded, d_target_label_encoded)
+                d_on_encoded = discriminator(
+                    y_wm[:, offset_samples:-waveform_length].detach()
+                )
+                # target label for encoded images should be 'encoded', because we want discriminator to fight with encoder
+                d_loss_on_encoded = F.binary_cross_entropy_with_logits(
+                    d_on_encoded, d_target_label_encoded
+                )
                 d_loss_on_encoded.backward()
 
                 torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=1.0)
 
                 my_step(d_op, lr_sched_d, global_step, train_len)
 
-            decoder_acc = [((decoded[0] >= 0).eq(msg >= 0).sum().float() / msg.numel()).item(),
-                           ((decoded[1] >= 0).eq(msg >= 0).sum().float() / msg.numel()).item()]
+            decoder_acc = (
+                (decoded >= 0).eq(msg >= 0).sum().float() / msg.numel()
+            ).item()
+
+            decoder_acc_griffin = (
+                (decoded_griffin >= 0).eq(msg >= 0).sum().float() / msg.numel()
+            ).item()
+
             zero_tensor = torch.zeros(wav_matrix.shape).to(device)
             snr = 10 * torch.log10(
-                mse_loss(wav_matrix.detach(), zero_tensor) / mse_loss(wav_matrix.detach(), y_wm.detach()))
+                mse_loss(wav_matrix.detach(), zero_tensor)
+                / mse_loss(wav_matrix.detach(), y_wm.detach())
+            )
             norm2 = mse_loss(wav_matrix.detach(), zero_tensor)
 
             # Update averages
-            train_avg_acc[0] += decoder_acc[0]
-            train_avg_acc[1] += decoder_acc[1]
+            train_avg_acc += decoder_acc
+            train_avg_acc_griffin += decoder_acc_griffin
             train_avg_snr += snr.item()
             train_avg_wav_loss += losses[0].item()
-            train_avg_msg_loss += losses[1].item()
-            train_avg_loudness_loss += losses[2].item()
+            train_avg_loudness_loss += losses[1].item()
+            train_avg_msg_loss += losses[2].item()
+            train_avg_msg_loss_griffin += loss_giffin
             if train_config["adv"]:
                 train_avg_d_loss_on_cover += d_loss_on_cover.item()
                 train_avg_d_loss_on_encoded += d_loss_on_encoded.item()
 
             if step % show_circle == 0:
-                logging.info('-' * 100)
-                logging.info("step:{} - wav_loss:{:.8f} - msg_loss:{:.8f} - tfloudness_loss:{:.8f} - acc:[{:.8f},{:.8f}] - snr:{:.8f} - norm:{:.8f} - patch_num:{} - pad_num:{} - wav_len:{} ".format(
-                    step, losses[0], losses[1], losses[2], decoder_acc[0], decoder_acc[1],
-                    snr, norm2, sample["patch_num"].tolist(), sample["pad_num"].tolist(), wav_matrix.shape[-1], d_loss_on_encoded.item(), d_loss_on_cover.item()))
+                logging.info("-" * 100)
+                logging.info(
+                    "step:{} - wav_loss:{:.8f} - tfloudness_loss:{:.8f} - msg_loss:{:.8f} - msg_loss_identity:{:.8f} - acc:{:.8f} - acc_griffin:{:.8f} - snr:{:.8f} - norm:{:.8f} - patch_num:{} - pad_num:{} - wav_len:{} ".format(
+                        step,
+                        losses[0],
+                        losses[1],
+                        losses[2],
+                        loss_giffin.item(),
+                        decoder_acc,
+                        decoder_acc_griffin,
+                        snr,
+                        norm2,
+                        sample["patch_num"].tolist(),
+                        sample["pad_num"].tolist(),
+                        wav_matrix.shape[-1],
+                        d_loss_on_encoded.item(),
+                        d_loss_on_cover.item(),
+                    )
+                )
+            # --- Memory Cleanup ---
+            # Delete all intermediate variables that are no longer needed
+            del (wav_matrix, msg, watermark, y_wm, decoded, losses)
+            if train_config["adv"]:
+                del d_target_label_cover, d_on_cover, d_loss_on_cover
+                del d_target_label_encoded, d_on_encoded, d_loss_on_encoded
 
-        train_avg_acc[0] /= step
-        train_avg_acc[1] /= step
+        train_avg_acc /= step
+        train_avg_acc_griffin /= step
         train_avg_snr /= step
         train_avg_wav_loss /= step
         train_avg_msg_loss /= step
+        train_avg_msg_loss_griffin /= step
         train_avg_loudness_loss /= step
         train_avg_d_loss_on_encoded /= step
         train_avg_d_loss_on_cover /= step
@@ -347,9 +416,10 @@ def main(configs):
         train_metrics = {
             "train/wav_loss": train_avg_wav_loss,
             "train/msg_loss": train_avg_msg_loss,
+            "train/msg_loss_griffin": train_avg_msg_loss_griffin,
             "train/loudness_loss": train_avg_loudness_loss,
-            "train/acc_1": train_avg_acc[0],
-            "train/acc_2": train_avg_acc[1],
+            "train/acc": train_avg_acc,
+            "train/acc_griffin": train_avg_acc_griffin,
             "train/snr": train_avg_snr,
             "train/d_loss_on_encoded": train_avg_d_loss_on_encoded,
             "train/d_loss_on_cover": train_avg_d_loss_on_cover,
@@ -358,9 +428,9 @@ def main(configs):
         # if ep % save_circle == 0 or ep == 1 or ep == 2:
         if ep % save_circle == 0:
             if not model_config["structure"]["ab"]:
-                path = os.path.join(train_config["path"]["ckpt"], 'pth')
+                path = os.path.join(train_config["path"]["ckpt"], "pth")
             else:
-                path = os.path.join(train_config["path"]["ckpt"], 'pth_ab')
+                path = os.path.join(train_config["path"]["ckpt"], "pth_ab")
             save_op(path, ep, encoder, decoder, en_de_op)
             # shutil.copyfile(os.path.realpath(__file__), os.path.join(path, os.path.basename(os.path.realpath(__file__)))) # save training scripts
 
@@ -369,10 +439,12 @@ def main(configs):
             encoder.eval()
             decoder.eval()
             discriminator.eval()
-            val_avg_acc = [0, 0]
+            val_avg_acc = 0
+            val_avg_acc_griffin = 0
             val_avg_snr = 0
             val_avg_wav_loss = 0
             val_avg_msg_loss = 0
+            val_avg_msg_loss_griffin = 0
             val_avg_loudness_loss = 0
             val_avg_d_loss_on_encoded = 0
             val_avg_d_loss_on_cover = 0
@@ -383,55 +455,100 @@ def main(configs):
                 # ---------------- build watermark
                 wav_matrix = sample["matrix"].to(device)
                 msg = generate_random_msg(wav_matrix.size(0), msg_length, device)
-                watermark, carrier_wateramrked = encoder(wav_matrix, msg, global_step)
-
+                watermark, zeros_right = encoder(wav_matrix, msg, global_step)
+                waveform_length = (zeros_right - 1) * 160 + 320
                 y_wm = wav_matrix + watermark
                 decoded = decoder(y_wm, global_step)
                 losses = loss.en_de_loss(wav_matrix, y_wm, msg, decoded)
+                y_wm_mel = mel_transform.mel_spectrogram(y_wm)
+                y_wm_d = mel_transform.griffin_lim_gpu(magnitudes=y_wm_mel)
+                decoded_griffin = decoder(y_wm_d, global_step)
+                loss_griffin = loss.identity_msg_loss(msg, decoded_griffin)
                 # adv
                 if train_config["adv"]:
                     lambda_a = lambda_m = train_config["optimize"]["lambda_a"]
-                    g_target_label_encoded = torch.full((b, 1), 1, device=device).float()
-                    d_on_encoded_for_enc = discriminator(y_wm)
-                    g_loss_adv = F.binary_cross_entropy_with_logits(d_on_encoded_for_enc, g_target_label_encoded)
+                    g_target_label_encoded = torch.full(
+                        (b, 1), 1, device=device
+                    ).float()
+                    d_on_encoded_for_enc = discriminator(
+                        y_wm[:, offset_samples:-waveform_length]
+                    )
+                    g_loss_adv = F.binary_cross_entropy_with_logits(
+                        d_on_encoded_for_enc, g_target_label_encoded
+                    )
                 if train_config["adv"]:
                     d_target_label_cover = torch.full((b, 1), 1, device=device).float()
-                    d_on_cover = discriminator(wav_matrix)
-                    d_loss_on_cover = F.binary_cross_entropy_with_logits(d_on_cover, d_target_label_cover)
+                    d_on_cover = discriminator(
+                        wav_matrix[:, offset_samples:-waveform_length]
+                    )
+                    d_loss_on_cover = F.binary_cross_entropy_with_logits(
+                        d_on_cover, d_target_label_cover
+                    )
 
-                    d_target_label_encoded = torch.full((b, 1), 0, device=device).float()
-                    d_on_encoded = discriminator(y_wm.detach())
-                    d_loss_on_encoded = F.binary_cross_entropy_with_logits(d_on_encoded, d_target_label_encoded)
-                
-                decoder_acc = [((decoded[0] >= 0).eq(msg >= 0).sum().float() / msg.numel()).item(), ((decoded[1] >= 0).eq(msg >= 0).sum().float() / msg.numel()).item()]
+                    d_target_label_encoded = torch.full(
+                        (b, 1), 0, device=device
+                    ).float()
+                    d_on_encoded = discriminator(
+                        y_wm[:, offset_samples:-waveform_length].detach()
+                    )
+                    d_loss_on_encoded = F.binary_cross_entropy_with_logits(
+                        d_on_encoded, d_target_label_encoded
+                    )
+
+                decoder_acc = (
+                    (decoded >= 0).eq(msg >= 0).sum().float() / msg.numel()
+                ).item()
+
+                decoder_acc_griffin = (
+                    (decoded_griffin >= 0).eq(msg >= 0).sum().float() / msg.numel()
+                ).item()
+
                 zero_tensor = torch.zeros(wav_matrix.shape).to(device)
-                snr = 10 * torch.log10(mse_loss(wav_matrix.detach(), zero_tensor) / mse_loss(wav_matrix.detach(), y_wm.detach()))
-                val_avg_acc[0] += decoder_acc[0]
-                val_avg_acc[1] += decoder_acc[1]
+                snr = 10 * torch.log10(
+                    mse_loss(wav_matrix.detach(), zero_tensor)
+                    / mse_loss(wav_matrix.detach(), y_wm.detach())
+                )
+                val_avg_acc += decoder_acc
+                val_avg_acc_griffin += decoder_acc_griffin
                 val_avg_snr += snr
                 val_avg_wav_loss += losses[0].item()
-                val_avg_msg_loss += losses[1].item()
-                val_avg_loudness_loss += losses[2].item()
+                val_avg_loudness_loss += losses[1].item()
+                val_avg_msg_loss += losses[2].item()
+                val_avg_msg_loss_griffin += loss_griffin
                 val_avg_d_loss_on_cover += d_loss_on_cover
                 val_avg_d_loss_on_encoded += d_loss_on_encoded
-            val_avg_acc[0] /= count
-            val_avg_acc[1] /= count
+            val_avg_acc /= count
+            val_avg_acc_griffin /= count
             val_avg_snr /= count
             val_avg_wav_loss /= count
             val_avg_msg_loss /= count
+            val_avg_msg_loss_griffin /= count
             val_avg_loudness_loss /= count
             val_avg_d_loss_on_encoded /= count
             val_avg_d_loss_on_cover /= count
-            logging.info('#e' * 60)
-            logging.info("epoch:{} - wav_loss:{:.8f} - msg_loss:{:.8f} - tfloudness_loss:{:.8f} - acc:[{:.8f},{:.8f}] - snr:{:.8f} - d_loss_on_encoded:{} - d_loss_on_cover:{}".format(
-                ep, val_avg_wav_loss, val_avg_msg_loss, val_avg_loudness_loss, val_avg_acc[0], val_avg_acc[1], val_avg_snr, val_avg_d_loss_on_encoded.item(), val_avg_d_loss_on_cover.item()))
+            logging.info("#e" * 60)
+            logging.info(
+                "epoch:{} - wav_loss:{:.8f} - tfloudness_loss:{:.8f} - msg_loss:{:.8f} - msg_loss_identity:{:.8f} - acc:{:.8f} - acc_griffin:{:.8f} - snr:{:.8f} - d_loss_on_encoded:{} - d_loss_on_cover:{}".format(
+                    ep,
+                    val_avg_wav_loss,
+                    val_avg_loudness_loss,
+                    val_avg_msg_loss,
+                    val_avg_msg_loss_griffin,
+                    val_avg_acc,
+                    val_avg_acc_griffin,
+                    val_avg_snr,
+                    val_avg_d_loss_on_encoded.item(),
+                    val_avg_d_loss_on_cover.item(),
+                )
+            )
 
         val_metrics = {
             "val/wav_loss": val_avg_wav_loss,
             "val/msg_loss": val_avg_msg_loss,
+            "val/msg_loss_griffin": val_avg_msg_loss_griffin,
             "val/tfloudness_loss": val_avg_loudness_loss,
-            "val/acc_1": val_avg_acc[0],
-            "val/acc_2": val_avg_acc[1],
+            "val/acc": val_avg_acc,
+            "val/acc_griffin": val_avg_acc_griffin,
             "val/snr": val_avg_snr,
             "val/d_loss_on_encoded": val_avg_d_loss_on_encoded,
             "val/d_loss_on_cover": val_avg_d_loss_on_cover,
@@ -444,10 +561,12 @@ def main(configs):
         encoder.eval()
         decoder.eval()
         discriminator.eval()
-        test_avg_acc = [0, 0]
+        test_avg_acc = 0
+        test_avg_acc_griffin = 0
         test_avg_snr = 0
         test_avg_wav_loss = 0
         test_avg_msg_loss = 0
+        test_avg_msg_loss_griffin = 0
         test_avg_loudness_loss = 0
         test_avg_d_loss_on_encoded = 0
         test_avg_d_loss_on_cover = 0
@@ -458,36 +577,62 @@ def main(configs):
             # ---------------- build watermark
             wav_matrix = sample["matrix"].to(device)
             msg = generate_random_msg(wav_matrix.size(0), msg_length, device)
-            watermark, carrier_wateramrked = encoder(wav_matrix, msg, global_step)
+            watermark, zeros_right = encoder(wav_matrix, msg, global_step)
+            waveform_length = (zeros_right - 1) * 160 + 320
             y_wm = wav_matrix + watermark
             decoded = decoder(y_wm, global_step)
             losses = loss.en_de_loss(wav_matrix, y_wm, msg, decoded)
+            y_wm_mel = mel_transform.mel_spectrogram(y_wm)
+            y_wm_d = mel_transform.griffin_lim_gpu(magnitudes=y_wm_mel)
+            decoded_griffin = decoder(y_wm_d, global_step)
+            loss_griffin = loss.identity_msg_loss(msg, decoded_griffin)
             # adv
             if train_config["adv"]:
                 lambda_a = lambda_m = train_config["optimize"]["lambda_a"]
                 g_target_label_encoded = torch.full((b, 1), 1, device=device).float()
-                d_on_encoded_for_enc = discriminator(y_wm)
-                g_loss_adv = F.binary_cross_entropy_with_logits(d_on_encoded_for_enc, g_target_label_encoded)
+                d_on_encoded_for_enc = discriminator(
+                    y_wm[:, offset_samples:-waveform_length]
+                )
+                g_loss_adv = F.binary_cross_entropy_with_logits(
+                    d_on_encoded_for_enc, g_target_label_encoded
+                )
             if train_config["adv"]:
                 d_target_label_cover = torch.full((b, 1), 1, device=device).float()
-                d_on_cover = discriminator(wav_matrix)
-                d_loss_on_cover = F.binary_cross_entropy_with_logits(d_on_cover, d_target_label_cover)
+                d_on_cover = discriminator(
+                    wav_matrix[:, offset_samples:-waveform_length]
+                )
+                d_loss_on_cover = F.binary_cross_entropy_with_logits(
+                    d_on_cover, d_target_label_cover
+                )
 
                 d_target_label_encoded = torch.full((b, 1), 0, device=device).float()
-                d_on_encoded = discriminator(y_wm.detach())
-                d_loss_on_encoded = F.binary_cross_entropy_with_logits(d_on_encoded, d_target_label_encoded)
+                d_on_encoded = discriminator(
+                    y_wm[:, offset_samples:-waveform_length].detach()
+                )
+                d_loss_on_encoded = F.binary_cross_entropy_with_logits(
+                    d_on_encoded, d_target_label_encoded
+                )
 
-            decoder_acc = [((decoded[0] >= 0).eq(msg >= 0).sum().float() / msg.numel()).item(),
-                           ((decoded[1] >= 0).eq(msg >= 0).sum().float() / msg.numel()).item()]
+            decoder_acc = (
+                (decoded >= 0).eq(msg >= 0).sum().float() / msg.numel()
+            ).item()
+
+            decoder_acc_griffin = (
+                (decoded_griffin >= 0).eq(msg >= 0).sum().float() / msg.numel()
+            ).item()
+
             zero_tensor = torch.zeros(wav_matrix.shape).to(device)
             snr = 10 * torch.log10(
-                mse_loss(wav_matrix.detach(), zero_tensor) / mse_loss(wav_matrix.detach(), y_wm.detach()))
-            test_avg_acc[0] += decoder_acc[0]
-            test_avg_acc[1] += decoder_acc[1]
+                mse_loss(wav_matrix.detach(), zero_tensor)
+                / mse_loss(wav_matrix.detach(), y_wm.detach())
+            )
+            test_avg_acc += decoder_acc
+            test_avg_acc_griffin += decoder_acc_griffin
             test_avg_snr += snr
             test_avg_wav_loss += losses[0]
-            test_avg_msg_loss += losses[1]
-            test_avg_loudness_loss += losses[2]
+            test_avg_loudness_loss += losses[1]
+            test_avg_msg_loss += losses[2]
+            test_avg_msg_loss_griffin += loss_griffin.item()
             test_avg_d_loss_on_cover += d_loss_on_cover
             test_avg_d_loss_on_encoded += d_loss_on_encoded
             # Initialize wandb only if enabled in config
@@ -511,18 +656,30 @@ def main(configs):
             #                 buffer_to_wandb_image(watermarked_buf),
             #                 buffer_to_wandb_image(watermark_buf))
 
-        test_avg_acc[0] /= count
-        test_avg_acc[1] /= count
+        test_avg_acc /= count
+        test_avg_acc_griffin /= count
         test_avg_snr /= count
         test_avg_wav_loss /= count
         test_avg_msg_loss /= count
+        test_avg_msg_loss_griffin /= count
         test_avg_loudness_loss /= count
         test_avg_d_loss_on_encoded /= count
         test_avg_d_loss_on_cover /= count
-        test_loss = test_avg_acc[0] + test_avg_acc[1] + test_avg_snr + test_avg_wav_loss + test_avg_msg_loss + test_avg_d_loss_on_encoded + test_avg_d_loss_on_cover
-        logging.info('#test' * 20)
-        logging.info("Test: wav_loss:{:.8f} - msg_loss:{:.8f} - tfloudness_loss:{:.8f} - acc:[{:.8f},{:.8f}] - snr:{:.8f} - d_loss_on_encoded:{} - d_loss_on_cover:{}".format(
-            test_avg_wav_loss, test_avg_msg_loss, test_avg_loudness_loss, test_avg_acc[0], test_avg_acc[1], test_avg_snr, test_avg_d_loss_on_encoded.item(), test_avg_d_loss_on_cover.item()))
+
+        logging.info("#test" * 20)
+        logging.info(
+            "Test: wav_loss:{:.8f} - msg_loss:{:.8f} - tfloudness_loss:{:.8f} - msg_loss_griffin:{:.8f} - acc:{:.8f} - acc_griffin:{:.8f} - snr:{:.8f} - d_loss_on_encoded:{} - d_loss_on_cover:{}".format(
+                test_avg_wav_loss,
+                test_avg_msg_loss,
+                test_avg_loudness_loss,
+                test_avg_msg_loss_griffin,
+                test_avg_acc,
+                test_avg_acc_griffin,
+                test_avg_snr,
+                test_avg_d_loss_on_encoded.item(),
+                test_avg_d_loss_on_cover.item(),
+            )
+        )
 
         if train_config["wandb"]["enabled"]:
             # Log the audio_table to wandb
@@ -530,12 +687,12 @@ def main(configs):
 
         if train_config["wandb"]["enabled"] and test_loss_summary_table is not None:
             test_loss_summary_table.add_data(
-                test_loss,
                 test_avg_wav_loss,
                 test_avg_msg_loss,
+                test_avg_msg_loss_griffin,
                 test_avg_loudness_loss,
-                test_avg_acc[0],
-                test_avg_acc[1],
+                test_avg_acc,
+                test_avg_acc_griffin,
                 test_avg_snr,
                 test_avg_d_loss_on_encoded,
                 test_avg_d_loss_on_cover,
@@ -559,10 +716,18 @@ if __name__ == "__main__":
         default=r"./config/process.yaml",
     )
     parser.add_argument(
-        "-m", "--model_config", type=str, help="path to model.yaml", default=r"./config/model.yaml"
+        "-m",
+        "--model_config",
+        type=str,
+        help="path to model.yaml",
+        default=r"./config/model.yaml",
     )
     parser.add_argument(
-        "-t", "--train_config", type=str, help="path to train.yaml", default=r"./config/train.yaml"
+        "-t",
+        "--train_config",
+        type=str,
+        help="path to train.yaml",
+        default=r"./config/train.yaml",
     )
     args = parser.parse_args()
 
