@@ -323,6 +323,7 @@ def main(configs):
                 chain(encoder.parameters(), decoder.parameters()), max_norm=1.0
             )
 
+
             my_step(en_de_op, lr_sched, global_step, train_len)
 
             if train_config["adv"]:
