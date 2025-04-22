@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
-from distortions.frequency import fixed_STFT
+from torch.nn import LeakyReLU
+from .blocks import FCBlock, Conv2Encoder, WatermarkEmbedder, WatermarkExtracter, ReluBlock
+from distortions.frequency import TacotronSTFT, fixed_STFT, tacotron_mel
 from silero_vad import load_silero_vad
 from torch.nn import LeakyReLU
 
@@ -296,7 +298,7 @@ class Encoder(nn.Module):
             phase = torch.atan2(imag_part, real_part)
 
             y = self.stft.inverse(spect, phase).squeeze(1)
-            del spect, phase, real_part, imag_part, all_watermark_stft
+            del spect, phase, real_part, imag_part
 
             # with torch.no_grad():
             #     # Get chunk-level speech probabilities for the batch.
@@ -317,7 +319,7 @@ class Encoder(nn.Module):
             #
             # # Apply the mask to the original audio to zero out non-speech regions.
             # masked_y = y * sample_masks
-            return y, zeros_right.shape[-1]
+            return y, all_watermark_stft
         else:
             print("Not enough watermarking!!!!")
             return None
@@ -326,6 +328,12 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, process_config, model_config, train_config, msg_length):
         super(Decoder, self).__init__()
+        self.robust = model_config["robust"]
+        # if self.robust:
+        #     self.dl = distortion(process_config, train_config)
+        self.mel_transform = TacotronSTFT(filter_length=process_config["mel"]["n_fft"], hop_length=process_config["mel"]["hop_length"], win_length=process_config["mel"]["win_length"])
+        # self.vocoder = get_vocoder(device)
+        self.vocoder_step = model_config["structure"]["vocoder_step"]
         self.win_dim = int((process_config["mel"]["n_fft"] / 2) + 1)
         self.hop_length = process_config["mel"]["hop_length"]
         self.block = model_config["conv2"]["block"]
@@ -344,7 +352,15 @@ class Decoder(nn.Module):
         )
 
     def forward(self, y, global_step):
-        _, _, stft_result = self.stft.transform(y)
+        y_identity = y
+        if global_step > self.vocoder_step:
+            y_mel = self.mel_transform.mel_spectrogram(y.squeeze(1))
+            # y = self.vocoder(y_mel)
+            y_d = (self.mel_transform.griffin_lim(magnitudes=y_mel)).unsqueeze(1)
+        else:
+            y_d = y
+
+        spect, phase, stft_result = self.stft.transform(y_d.squeeze(1))
         extracted_wm = self.EX(stft_result).squeeze(1)  # (B, win_dim, length)
         # Explicitly split the 162-dim vector into two halves of 81-dim each
         low, high = extracted_wm.chunk(

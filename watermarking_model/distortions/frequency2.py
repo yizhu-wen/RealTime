@@ -19,11 +19,11 @@ def _exp(x, base):
 
 class tacotron_mel:
     def __init__(self):
-        self.preemphasis = 0.0
-        self.do_amp_to_db_mel = True
-        self.fft_size = 1024
-        self.hop_length = 256
-        self.win_length = 1024
+        self.preemphasis=0.0
+        self.do_amp_to_db_mel=True
+        self.fft_size = 322
+        self.hop_length = 160
+        self.win_length = 322
         self.stft_pad_mode = "reflect"
         self.spec_gain = 20
         log_func = "np.log"
@@ -459,16 +459,9 @@ def window_sumsquare(
 
 
 class TacotronSTFT(torch.nn.Module):
-    def __init__(
-        self,
-        filter_length=1024,
-        hop_length=256,
-        win_length=1024,
-        n_mel_channels=80,
-        sampling_rate=22050,
-        mel_fmin=0.0,
-        mel_fmax=8000.0,
-    ):
+    def __init__(self, filter_length=322, hop_length=160, win_length=322,
+                 n_mel_channels=80, sampling_rate=16000, mel_fmin=0.0,
+                 mel_fmax=8000.0):
         super(TacotronSTFT, self).__init__()
         self.n_mel_channels = n_mel_channels
         self.sampling_rate = sampling_rate
